@@ -32,7 +32,7 @@ class HandTracker(ctx: Context) {
         if (h == null) return if (now - lastSeen < 150) last else null
         fun d(a: Int, c: Int) = hypot(h[a].x() - h[c].x(), h[a].y() - h[c].y())
         val ratio = d(4, 8) / d(0, 9).coerceAtLeast(1e-3f)
-        pinching = if (pinching) ratio < 0.5f else ratio < 0.3f
+        pinching = if (pinching) ratio < 0.65f else ratio < 0.4f
         val p = HandPose((h[4].x() + h[8].x()) / 2f, (h[4].y() + h[8].y()) / 2f, pinching)
         last = p; lastSeen = now
         return p
