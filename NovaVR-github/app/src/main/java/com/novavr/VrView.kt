@@ -150,28 +150,22 @@ class VrView(private val act: Activity, private val browser: BrowserSurface, pri
 
     // ---------- interação: mão (pinça) ou olhar (permanência) ----------
     private fun interact(ppr: Float, yw: Float, dt: Float, ew: Float, h: Int) {
-        val hd = hand; val cb = cam
-        if (hd != null && cb != null) {
-            val ex = (hd.x * cb.width - cropL) * cropS - ew / 2f
-            val ey = (hd.y * cb.height - cropT) * cropS - h / 2f
-            vx = ex * cos(roll) - ey * sin(roll); vy = ex * sin(roll) + ey * cos(roll)
-        } else { vx = 0f; vy = 0f }
-        val ht = hit(vx, vy, ppr, yw)
+        val hd = hand
+        vx = 0f; vy = 0f                      // o cursor e o ponto no centro da visao (mira com a cabeca)
+        val ht = hit(0f, 0f, ppr, yw)
         val id = ht?.let { t -> t.first.btns.firstOrNull { it.r.contains(t.second, t.third) }?.id } ?: ""
         if (id != hoverId) { hoverId = id; drawBar(); drawKb() }
         if (ht != null && ht.first === web) { lx = ht.second; ly = ht.third }
-        if (hd != null) {
-            dwell = 0f
-            if (hd.pinch && !pinching) {
-                pinching = true; downPanel = ht?.first
-                if (ht != null) { if (ht.first === web) browser.touch(MotionEvent.ACTION_DOWN, lx, ly) else if (id.isNotEmpty()) onButton(id) }
-            } else if (hd.pinch) {
-                if (downPanel === web) browser.touch(MotionEvent.ACTION_MOVE, lx, ly)
-            } else if (pinching) {
-                pinching = false; if (downPanel === web) browser.touch(MotionEvent.ACTION_UP, lx, ly); downPanel = null
-            }
-        } else {
-            if (pinching) { pinching = false; if (downPanel === web) browser.touch(MotionEvent.ACTION_UP, lx, ly); downPanel = null }
+        val pinch = hd?.pinch == true
+        if (pinch && !pinching) {
+            pinching = true; downPanel = ht?.first; dwell = -.8f
+            if (ht != null) { if (ht.first === web) browser.touch(MotionEvent.ACTION_DOWN, lx, ly) else if (id.isNotEmpty()) onButton(id) }
+        } else if (pinch) {
+            if (downPanel === web) browser.touch(MotionEvent.ACTION_MOVE, lx, ly)
+        } else if (pinching) {
+            pinching = false; if (downPanel === web) browser.touch(MotionEvent.ACTION_UP, lx, ly); downPanel = null
+        }
+        if (!pinching) {
             if (id.isNotEmpty() && id == dwellId) dwell += dt else dwell = 0f
             dwellId = id
             if (dwell >= 1.2f) { onButton(id); dwell = -.8f }
@@ -210,6 +204,8 @@ class VrView(private val act: Activity, private val browser: BrowserSurface, pri
                 c.drawBitmap(cb, Rect(cropL.toInt(), cropT.toInt(), (cropL + ew / cropS).toInt(), (cropT + h / cropS).toInt()),
                     RectF(-ew / 2f, -h / 2f, ew / 2f, h / 2f), bp)
             }
+            tp.textAlign = Paint.Align.CENTER; tp.textSize = 26f
+            c.drawText("camera: " + (if (cb != null) "ok" else "nao") + "   mao: " + (if (hand != null) "ok" else "nao") + (if (pinching) "   PINCA" else ""), 0f, -h / 2f + 60f, tp)
             c.rotate(-Math.toDegrees(roll.toDouble()).toFloat())
             val par = if (eye == 0) 14f else -14f
             val list = if (kbOn) listOf(web, bar, kb) else listOf(web, bar)
@@ -221,18 +217,14 @@ class VrView(private val act: Activity, private val browser: BrowserSurface, pri
                     else { p.color = 0xFF151927.toInt(); c.drawRoundRect(dst, 30f, 30f, p) }
                 } else q.bmp?.let { c.drawBitmap(it, null, dst, bp) }
             }
-            // cursor
-            val onPanel = hit(vx, vy, ppr, yw) != null
-            val cxr = vx + if (onPanel) par else 0f
-            if (hand != null) {
-                p.style = Paint.Style.FILL; p.color = if (pinching) 0xFF22C55E.toInt() else 0xFFFFFFFF.toInt()
-                c.drawCircle(cxr, vy, if (pinching) 10f else 16f, p)
-            } else {
-                p.style = Paint.Style.STROKE; p.strokeWidth = 5f; p.color = Color.WHITE
-                c.drawCircle(0f, 0f, 16f, p)
-                if (dwell > 0f) { p.color = 0xFF9D86FF.toInt(); c.drawArc(RectF(-24f, -24f, 24f, 24f), -90f, 360f * dwell / 1.2f, false, p) }
-                p.style = Paint.Style.FILL
-            }
+            // cursor: sempre no centro da visao
+            val onPanel = hit(0f, 0f, ppr, yw) != null
+            val cxr = if (onPanel) par else 0f
+            p.style = Paint.Style.STROKE; p.strokeWidth = 5f
+            p.color = if (pinching) 0xFF22C55E.toInt() else Color.WHITE
+            c.drawCircle(cxr, 0f, 16f, p)
+            if (dwell > 0f) { p.color = 0xFF9D86FF.toInt(); c.drawArc(RectF(cxr - 24f, -24f, cxr + 24f, 24f), -90f, 360f * dwell / 1.2f, false, p) }
+            p.style = Paint.Style.FILL
             c.restore()
         }
         postInvalidateOnAnimation()
