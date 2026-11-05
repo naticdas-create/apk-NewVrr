@@ -28,7 +28,13 @@ class VrView(private val act: Activity, private val browser: BrowserSurface, pri
     }
 
     @Volatile var cam: Bitmap? = null
-    @Volatile var hand: HandPose? = null
+    @Volatile var hands: List<Hand> = emptyList()
+    class Ptr(val hand: Hand, val ox: Float, val oy: Float, val tx: Float, val ty: Float, val pinch: Boolean)
+    private val ptrs = ArrayList<Ptr>()
+    private val sx = FloatArray(2); private val sy = FloatArray(2); private val sOn = BooleanArray(2)
+    private val hp = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val chains = arrayOf(intArrayOf(0, 1, 2, 3, 4), intArrayOf(0, 5, 6, 7, 8), intArrayOf(0, 9, 10, 11, 12),
+        intArrayOf(0, 13, 14, 15, 16), intArrayOf(0, 17, 18, 19, 20))
 
     private val W = 1.117f // largura das janelas em rad (~64°)
     private val web = Panel(0f, .03f, W, browser.w, browser.h)
@@ -150,13 +156,31 @@ class VrView(private val act: Activity, private val browser: BrowserSurface, pri
 
     // ---------- interação: mão (pinça) ou olhar (permanência) ----------
     private fun interact(ppr: Float, yw: Float, dt: Float, ew: Float, h: Int) {
-        val hd = hand
-        vx = 0f; vy = 0f                      // o cursor e o ponto no centro da visao (mira com a cabeca)
-        val ht = hit(0f, 0f, ppr, yw)
+        ptrs.clear()
+        val cb = cam; val hs = hands
+        val seen = BooleanArray(2)
+        if (cb != null) for (hd in hs) {
+            val k = if (hd.left) 0 else 1
+            fun X(i: Int) = (hd.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
+            fun Y(i: Int) = (hd.pts[2 * i + 1] * cb.height - cropT) * cropS - h / 2f
+            val ox = (X(4) + X(8)) / 2f; val oy = (Y(4) + Y(8)) / 2f
+            var dx = X(5) - X(0); var dy = Y(5) - Y(0)          // direcao punho -> base do indicador
+            val n = hypot(dx, dy).coerceAtLeast(1f); dx /= n; dy /= n
+            val tx0 = ox + dx * ew * .35f; val ty0 = oy + dy * ew * .35f
+            if (!sOn[k]) { sx[k] = tx0; sy[k] = ty0 } else { sx[k] += (tx0 - sx[k]) * .3f; sy[k] += (ty0 - sy[k]) * .3f }
+            sOn[k] = true; seen[k] = true
+            ptrs.add(Ptr(hd, ox, oy, sx[k], sy[k], hd.pinch))
+        }
+        for (k in 0..1) if (!seen[k]) sOn[k] = false
+        val act = ptrs.firstOrNull { it.pinch } ?: ptrs.firstOrNull()
+        if (act != null) {
+            vx = act.tx * cos(roll) - act.ty * sin(roll); vy = act.tx * sin(roll) + act.ty * cos(roll)
+        } else { vx = 0f; vy = 0f }
+        val ht = hit(vx, vy, ppr, yw)
         val id = ht?.let { t -> t.first.btns.firstOrNull { it.r.contains(t.second, t.third) }?.id } ?: ""
         if (id != hoverId) { hoverId = id; drawBar(); drawKb() }
         if (ht != null && ht.first === web) { lx = ht.second; ly = ht.third }
-        val pinch = hd?.pinch == true
+        val pinch = act?.pinch == true
         if (pinch && !pinching) {
             pinching = true; downPanel = ht?.first; dwell = -.8f
             if (ht != null) { if (ht.first === web) browser.touch(MotionEvent.ACTION_DOWN, lx, ly) else if (id.isNotEmpty()) onButton(id) }
@@ -165,16 +189,51 @@ class VrView(private val act: Activity, private val browser: BrowserSurface, pri
         } else if (pinching) {
             pinching = false; if (downPanel === web) browser.touch(MotionEvent.ACTION_UP, lx, ly); downPanel = null
         }
-        if (!pinching) {
+        if (!pinching && ptrs.isEmpty()) {
             if (id.isNotEmpty() && id == dwellId) dwell += dt else dwell = 0f
             dwellId = id
             if (dwell >= 1.2f) { onButton(id); dwell = -.8f }
+        } else if (ptrs.isNotEmpty()) dwell = 0f
+    }
+
+    private fun drawHand(c: Canvas, q: Ptr, par: Float, ppr: Float, yw: Float) {
+        val cb = cam ?: return
+        val ew = width / 2f; val h = height
+        fun X(i: Int) = (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
+        fun Y(i: Int) = (q.hand.pts[2 * i + 1] * cb.height - cropT) * cropS - h / 2f
+        val palm = hypot(X(0) - X(9), Y(0) - Y(9)).coerceAtLeast(20f)
+        hp.shader = null
+        // silhueta translucida da mao
+        hp.style = Paint.Style.STROKE; hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
+        hp.color = 0x773F5F7F; hp.strokeWidth = palm * .26f
+        for (ch in chains) {
+            val path = Path(); path.moveTo(X(ch[0]), Y(ch[0]))
+            for (k in 1 until ch.size) path.lineTo(X(ch[k]), Y(ch[k]))
+            c.drawPath(path, hp)
         }
+        val pm = Path(); pm.moveTo(X(0), Y(0))
+        for (i in intArrayOf(1, 5, 9, 13, 17)) pm.lineTo(X(i), Y(i))
+        pm.close(); hp.style = Paint.Style.FILL; c.drawPath(pm, hp)
+        // laser
+        val tvx = q.tx * cos(roll) - q.ty * sin(roll); val tvy = q.tx * sin(roll) + q.ty * cos(roll)
+        val tx = q.tx + if (hit(tvx, tvy, ppr, yw) != null) par else 0f
+        val col = if (q.pinch) 0xFF22C55E.toInt() else 0xFFFFFFFF.toInt()
+        hp.style = Paint.Style.STROKE
+        hp.shader = LinearGradient(q.ox, q.oy, tx, q.ty, col, col and 0x00FFFFFF, Shader.TileMode.CLAMP)
+        hp.strokeWidth = 18f; hp.alpha = 70; c.drawLine(q.ox, q.oy, tx, q.ty, hp)
+        hp.strokeWidth = 6f; hp.alpha = 255; c.drawLine(q.ox, q.oy, tx, q.ty, hp)
+        hp.shader = null
+        // gotinha no ponto da pinca e anel no alvo
+        hp.style = Paint.Style.FILL; hp.color = if (q.pinch) 0xFF22C55E.toInt() else 0xDDFFFFFF.toInt()
+        c.drawCircle(q.ox, q.oy, if (q.pinch) 9f else 12f, hp)
+        hp.style = Paint.Style.STROKE; hp.strokeWidth = 4f; hp.color = col
+        c.drawCircle(tx, q.ty, 16f, hp)
+        hp.style = Paint.Style.FILL
     }
 
     // Toque na tela = clique no ponto do olhar (útil se o VR Box tiver botão)
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        if (e.action == MotionEvent.ACTION_DOWN && hand == null) {
+        if (e.action == MotionEvent.ACTION_DOWN && hands.isEmpty()) {
             if (hoverId.isNotEmpty()) onButton(hoverId)
             else { browser.touch(MotionEvent.ACTION_DOWN, lx, ly); browser.touch(MotionEvent.ACTION_UP, lx, ly) }
         }
@@ -205,7 +264,7 @@ class VrView(private val act: Activity, private val browser: BrowserSurface, pri
                     RectF(-ew / 2f, -h / 2f, ew / 2f, h / 2f), bp)
             }
             tp.textAlign = Paint.Align.CENTER; tp.textSize = 26f
-            c.drawText("camera: " + (if (cb != null) "ok" else "nao") + "   mao: " + (if (hand != null) "ok" else "nao") + (if (pinching) "   PINCA" else ""), 0f, -h / 2f + 60f, tp)
+            c.drawText("camera: " + (if (cb != null) "ok" else "nao") + "   maos: " + hands.size + (if (pinching) "   PINCA" else ""), 0f, -h / 2f + 60f, tp)
             c.rotate(-Math.toDegrees(roll.toDouble()).toFloat())
             val par = if (eye == 0) 14f else -14f
             val list = if (kbOn) listOf(web, bar, kb) else listOf(web, bar)
@@ -217,14 +276,17 @@ class VrView(private val act: Activity, private val browser: BrowserSurface, pri
                     else { p.color = 0xFF151927.toInt(); c.drawRoundRect(dst, 30f, 30f, p) }
                 } else q.bmp?.let { c.drawBitmap(it, null, dst, bp) }
             }
-            // cursor: sempre no centro da visao
-            val onPanel = hit(0f, 0f, ppr, yw) != null
-            val cxr = if (onPanel) par else 0f
-            p.style = Paint.Style.STROKE; p.strokeWidth = 5f
-            p.color = if (pinching) 0xFF22C55E.toInt() else Color.WHITE
-            c.drawCircle(cxr, 0f, 16f, p)
-            if (dwell > 0f) { p.color = 0xFF9D86FF.toInt(); c.drawArc(RectF(cxr - 24f, -24f, cxr + 24f, 24f), -90f, 360f * dwell / 1.2f, false, p) }
-            p.style = Paint.Style.FILL
+            if (ptrs.isEmpty()) {
+                val onPanel = hit(0f, 0f, ppr, yw) != null
+                val cxr = if (onPanel) par else 0f
+                p.style = Paint.Style.STROKE; p.strokeWidth = 5f; p.color = Color.WHITE
+                c.drawCircle(cxr, 0f, 16f, p)
+                if (dwell > 0f) { p.color = 0xFF9D86FF.toInt(); c.drawArc(RectF(cxr - 24f, -24f, cxr + 24f, 24f), -90f, 360f * dwell / 1.2f, false, p) }
+                p.style = Paint.Style.FILL
+            } else {
+                c.rotate(Math.toDegrees(roll.toDouble()).toFloat())
+                for (q in ptrs) drawHand(c, q, par, ppr, yw)
+            }
             c.restore()
         }
         postInvalidateOnAnimation()
