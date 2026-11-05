@@ -61,7 +61,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 px.close()
                 vr.cam = b
-                vr.hand = try { tracker?.detect(b) } catch (e: Exception) { null }
+                vr.hands = try { tracker?.detect(b) ?: emptyList() } catch (e: Exception) { emptyList() }
             }
             val p = f.get()
             p.unbindAll()
