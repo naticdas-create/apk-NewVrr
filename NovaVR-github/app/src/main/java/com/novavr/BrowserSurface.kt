@@ -28,6 +28,7 @@ class BrowserSurface(private val ctx: Context, val w: Int = 1280, val h: Int = 7
     private var pres: Pres? = null
     private var bmp: Bitmap? = null
     private var downTime = 0L
+    @Volatile var version = 0
 
     private class Pres(c: Context, d: Display, val first: String) : Presentation(c, d) {
         lateinit var web: WebView
@@ -60,6 +61,7 @@ class BrowserSurface(private val ctx: Context, val w: Int = 1280, val h: Int = 7
         pl.buffer.rewind()
         b.copyPixelsFromBuffer(pl.buffer)
         img.close()
+        version++
         return b
     }
 
