@@ -22,7 +22,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var vr: VrGlView
     private lateinit var browser: BrowserSurface
     private var tracker: HandTracker? = null
-    private var ar: ArTracker? = null
     private val exec = Executors.newSingleThreadExecutor()
     private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) startCamera() }
 
@@ -45,13 +44,6 @@ class MainActivity : AppCompatActivity() {
     private fun startCamera() {
         tracker = try { HandTracker(this) } catch (e: Exception) {
             Toast.makeText(this, "Modelo de mãos ausente: usando só o olhar", Toast.LENGTH_LONG).show(); null
-        }
-        if (ArTracker.supported(this)) {
-            val a = ArTracker(this, tracker) { b, h -> vr.cam = b; vr.hands = h }
-            if (a.create()) { ar = a; vr.ar = a; a.resume(); return }
-            Toast.makeText(this, "ARCore falhou: sem tracking de posicao", Toast.LENGTH_LONG).show()
-        } else {
-            Toast.makeText(this, "ARCore indisponivel: instale Servicos do Google Play para RA", Toast.LENGTH_LONG).show()
         }
         val f = ProcessCameraProvider.getInstance(this)
         f.addListener({
@@ -77,8 +69,8 @@ class MainActivity : AppCompatActivity() {
         }, androidx.core.content.ContextCompat.getMainExecutor(this))
     }
 
-    override fun onResume() { super.onResume(); vr.onResume(); ar?.resume() }
-    override fun onPause() { ar?.pause(); vr.onPause(); super.onPause() }
+    override fun onResume() { super.onResume(); vr.onResume() }
+    override fun onPause() { vr.onPause(); super.onPause() }
 
     override fun onDestroy() {
         super.onDestroy()
