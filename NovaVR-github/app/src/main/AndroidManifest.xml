@@ -3,7 +3,6 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <uses-feature android:name="android.hardware.camera.ar" android:required="false" />
     <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="true" />
 
     <application
@@ -11,7 +10,6 @@
         android:label="NovaVR"
         android:theme="@style/Theme.AppCompat.NoActionBar"
         android:hardwareAccelerated="true">
-        <meta-data android:name="com.google.ar.core" android:value="optional" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
