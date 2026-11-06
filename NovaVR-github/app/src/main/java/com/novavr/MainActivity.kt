@@ -19,7 +19,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var vr: VrView
+    private lateinit var vr: VrGlView
     private lateinit var browser: BrowserSurface
     private var tracker: HandTracker? = null
     private val exec = Executors.newSingleThreadExecutor()
@@ -35,7 +35,7 @@ class MainActivity : AppCompatActivity() {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
         browser = BrowserSurface(this)
-        vr = VrView(this, browser) { finish() }
+        vr = VrGlView(this, browser) { finish() }
         setContentView(vr)
         browser.start("https://www.youtube.com/")
         perm.launch(Manifest.permission.CAMERA)
@@ -68,6 +68,9 @@ class MainActivity : AppCompatActivity() {
             p.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
         }, androidx.core.content.ContextCompat.getMainExecutor(this))
     }
+
+    override fun onResume() { super.onResume(); vr.onResume() }
+    override fun onPause() { vr.onPause(); super.onPause() }
 
     override fun onDestroy() {
         super.onDestroy()
