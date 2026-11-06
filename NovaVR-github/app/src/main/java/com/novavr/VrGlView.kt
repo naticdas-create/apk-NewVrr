@@ -523,37 +523,132 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private fun drawOverlay() {
         val b = ovBmp ?: return
-        b.eraseColor(0)
+        b.eraseColor(Color.TRANSPARENT)
+
         val c = Canvas(b)
-        val ew = fw / 2f; val eh = fh.toFloat()
-        c.translate(b.width / 2f, b.height / 2f); c.scale(b.width / ew, b.height / eh)
-        tp.textAlign = Paint.Align.CENTER; tp.textSize = 26f; tp.color = Color.WHITE
-        c.drawText("camera: " + (if (cam != null) "ok" else "nao") + "   maos: " + hands.size + (if (touchMode) "   toque" else "   laser") + (if (pinching) "   CLIQUE" else ""), 0f, -eh / 2f + 60f, tp)
-        val cb = cam ?: return
-        for (q in ptrs) {
-            fun X(i: Int) = (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
-            fun Y(i: Int) = (q.hand.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
-            val palm = hypot(X(0) - X(9), Y(0) - Y(9)).coerceAtLeast(20f)
+        val ew = fw / 2f
+        val eh = fh.toFloat()
+
+        // O bitmap do overlay tem exatamente a dimensao de UM olho.
+        // Assim, as coordenadas calculadas pelo tracking nao sofrem deslocamento.
+        c.translate(b.width / 2f, b.height / 2f)
+        c.scale(b.width / ew, b.height / eh)
+
+        val cb = cam
+        if (cb == null) {
             hp.shader = null
-            hp.style = Paint.Style.STROKE; hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
-            hp.color = 0xCC3F5F7F.toInt(); hp.strokeWidth = palm * .26f
-            for (ch in chains) {
-                val path = Path(); path.moveTo(X(ch[0]), Y(ch[0]))
-                for (k in 1 until ch.size) path.lineTo(X(ch[k]), Y(ch[k]))
+            hp.style = Paint.Style.FILL
+            return
+        }
+
+        // Diagnostico discreto, mantido do sistema original.
+        tp.textAlign = Paint.Align.CENTER
+        tp.textSize = 26f
+        tp.color = Color.WHITE
+        c.drawText(
+            "camera: ok   maos: ${hands.size}" +
+                (if (touchMode) "   toque" else "   laser") +
+                (if (pinching) "   CLIQUE" else ""),
+            0f,
+            -eh / 2f + 60f,
+            tp
+        )
+
+        for (q in ptrs) {
+            // Converte os landmarks da camera para coordenadas do olho.
+            fun X(i: Int): Float =
+                (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
+
+            fun Y(i: Int): Float =
+                (q.hand.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
+
+            val palm = hypot(X(0) - X(9), Y(0) - Y(9)).coerceAtLeast(20f)
+            val outlineWidth = (palm * 0.22f).coerceIn(5f, 30f)
+            val fillWidth = (palm * 0.135f).coerceIn(3f, 20f)
+            val gray = 0xFFD0D0D0.toInt()
+
+            hp.shader = null
+            hp.alpha = 255
+            hp.strokeCap = Paint.Cap.ROUND
+            hp.strokeJoin = Paint.Join.ROUND
+
+            // Laser fica atras da mao, para nao atravessar visualmente os dedos.
+            hp.style = Paint.Style.STROKE
+            hp.shader = LinearGradient(
+                q.ox, q.oy, q.tx + 0.5f, q.ty + 0.5f,
+                if (q.pinch) 0xFF22C55E.toInt() else 0xCCFFFFFF.toInt(),
+                0x00FFFFFF,
+                Shader.TileMode.CLAMP
+            )
+            hp.strokeWidth = max(4f, palm * 0.045f)
+            c.drawLine(q.ox, q.oy, q.tx, q.ty, hp)
+            hp.shader = null
+
+            // Contorno externo da palma.
+            val palmPath = Path().apply {
+                moveTo(X(0), Y(0))
+                for (i in intArrayOf(1, 5, 9, 13, 17)) {
+                    lineTo(X(i), Y(i))
+                }
+                close()
+            }
+
+            hp.style = Paint.Style.FILL
+            hp.color = gray
+            c.drawPath(palmPath, hp)
+
+            hp.style = Paint.Style.STROKE
+            hp.color = Color.BLACK
+            hp.strokeWidth = outlineWidth
+            c.drawPath(palmPath, hp)
+
+            // Primeiro desenha o contorno preto de cada dedo.
+            hp.style = Paint.Style.STROKE
+            hp.color = Color.BLACK
+            hp.strokeWidth = outlineWidth
+            for (chain in chains) {
+                val path = Path().apply {
+                    moveTo(X(chain[0]), Y(chain[0]))
+                    for (k in 1 until chain.size) {
+                        lineTo(X(chain[k]), Y(chain[k]))
+                    }
+                }
                 c.drawPath(path, hp)
             }
-            val pm = Path(); pm.moveTo(X(0), Y(0))
-            for (i in intArrayOf(1, 5, 9, 13, 17)) pm.lineTo(X(i), Y(i))
-            pm.close(); hp.style = Paint.Style.FILL; c.drawPath(pm, hp)
-            val col = if (q.pinch) 0xFF22C55E.toInt() else 0xFFFFFFFF.toInt()
-            hp.style = Paint.Style.STROKE
-            hp.shader = LinearGradient(q.ox, q.oy, q.tx + .5f, q.ty + .5f, col, col and 0x00FFFFFF, Shader.TileMode.CLAMP)
-            hp.strokeWidth = 18f; hp.alpha = 70; c.drawLine(q.ox, q.oy, q.tx, q.ty, hp)
-            hp.strokeWidth = 6f; hp.alpha = 255; c.drawLine(q.ox, q.oy, q.tx, q.ty, hp)
-            hp.shader = null
-            hp.style = Paint.Style.FILL; hp.color = if (q.pinch) 0xFF22C55E.toInt() else 0xDDFFFFFF.toInt()
-            c.drawCircle(q.ox, q.oy, if (q.pinch) 9f else 12f, hp)
+
+            // Depois desenha o preenchimento cinza por cima do contorno.
+            hp.color = gray
+            hp.strokeWidth = fillWidth
+            for (chain in chains) {
+                val path = Path().apply {
+                    moveTo(X(chain[0]), Y(chain[0]))
+                    for (k in 1 until chain.size) {
+                        lineTo(X(chain[k]), Y(chain[k]))
+                    }
+                }
+                c.drawPath(path, hp)
+            }
+
+            // Articulacoes com contorno preto e centro cinza.
+            hp.style = Paint.Style.FILL
+            for (i in 0..20) {
+                val radius = (palm * 0.052f).coerceIn(3f, 12f)
+                hp.color = Color.BLACK
+                c.drawCircle(X(i), Y(i), radius, hp)
+                hp.color = gray
+                c.drawCircle(X(i), Y(i), radius * 0.66f, hp)
+            }
+
+            // Ponta do indicador: destaque visual alinhado ao landmark 8.
+            val tipRadius = (palm * 0.09f).coerceIn(5f, 18f)
+            hp.color = Color.BLACK
+            c.drawCircle(X(8), Y(8), tipRadius, hp)
+            hp.color = if (q.pinch) 0xFF22C55E.toInt() else gray
+            c.drawCircle(X(8), Y(8), tipRadius * 0.68f, hp)
         }
+
+        hp.shader = null
+        hp.alpha = 255
         hp.style = Paint.Style.FILL
     }
 
@@ -605,7 +700,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
         GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, fboTex, 0)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        ovBmp = Bitmap.createBitmap(max(fw / 4, 64), max(fh / 2, 64), Bitmap.Config.ARGB_8888)
+        ovBmp = Bitmap.createBitmap(max(fw / 2, 64), max(fh, 64), Bitmap.Config.ARGB_8888)
     }
 
     private fun up(tex: Int, b: Bitmap): Int {
@@ -724,9 +819,21 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             val vis = wins.filter { it.visible }.sortedByDescending {
                 val dx = it.pos[0] - ex; val dy = it.pos[1] - ey; val dz = it.pos[2] - ez; dx * dx + dy * dy + dz * dz
             }
+            // Camadas 3D primeiro: as janelas e o cursor ficam atras da mao.
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            GLES20.glDisable(GLES20.GL_DEPTH_TEST)
             for (w in vis) drawWin(w, vp)
             drawCursor(vp)
-            if (ovTex != 0) drawQuad(FULL, ovTex, 0f, 0f, 1f, 1f, 1f)
+
+            // A mao vem por ultimo em coordenadas do olho (overlay transparente).
+            // Isso garante que ela seja composta sobre a superficie das janelas.
+            if (ovTex != 0) {
+                GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+                GLES20.glEnable(GLES20.GL_BLEND)
+                GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                drawQuad(FULL, ovTex, 0f, 0f, 1f, 1f, 1f)
+            }
         }
         // passada final: correcao de distorcao das lentes
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
