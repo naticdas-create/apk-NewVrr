@@ -3,6 +3,7 @@ package com.novavr
 import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
@@ -100,7 +101,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     // ---------- janelas ----------
     private val browserWin = Win("web", 2.2f, 2.2f * browser.h / browser.w, browser.w, browser.h).also { it.title = "Navegador"; it.sd = 2.2f; it.sy = .2f }
-    private val dock = Win("dock", 1.5f, .16f, 1200, 128, false).also { it.sd = 1.8f; it.sy = -1.0f }
+    private val dock = Win("dock", 1.6f, .16f, 1280, 128, false).also { it.sd = 1.8f; it.sy = -1.0f }
     private val addr = Win("addr", 2.2f, .14f, 1760, 112, false).also { it.sd = 2.2f; it.sy = .93f }
     private val apps = Win("apps", 1.3f, .9f, 1040, 720).also { it.title = "Biblioteca"; it.sd = 2.0f; it.sy = .1f; it.sa = -38f }
     private val kb = Win("kb", 1.6f, .65f, 1280, 520).also { it.title = "Teclado"; it.sd = 1.6f; it.sy = -1.1f }
@@ -111,18 +112,37 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private val appList = listOf(
         App("yt", "YouTube", "https://www.youtube.com/", 0xFFE5173F.toInt(), "YT"),
         App("nf", "Netflix", "https://www.netflix.com/", 0xFFB20710.toInt(), "N"),
-        App("g", "Google", "https://www.google.com/", 0xFF2F7DE1.toInt(), "G"),
-        App("rb", "Roblox", "https://www.roblox.com/", 0xFFD62B2B.toInt(), "RBX"),
-        App("tw", "Twitch", "https://www.twitch.tv/", 0xFF7C5CFF.toInt(), "TW"),
-        App("pv", "Prime Video", "https://www.primevideo.com/", 0xFF1A98FF.toInt(), "PV"),
-        App("dp", "Disney+", "https://www.disneyplus.com/", 0xFF113CCF.toInt(), "D+"),
         App("sp", "Spotify", "https://open.spotify.com/", 0xFF1DB954.toInt(), "SP"),
+        App("g", "Google", "https://www.google.com/", 0xFF2F7DE1.toInt(), "G"),
+        App("dp", "Disney+", "https://www.disneyplus.com/", 0xFF113CCF.toInt(), "D+"),
+        App("tw", "Twitch", "https://www.twitch.tv/", 0xFF7C5CFF.toInt(), "TW"),
+        App("rb", "Roblox", "https://www.roblox.com/", 0xFFD62B2B.toInt(), "RBX"),
+        App("pv", "Prime Video", "https://www.primevideo.com/", 0xFF1A98FF.toInt(), "PV"),
         App("gp", "Globoplay", "https://globoplay.globo.com/", 0xFFEF4444.toInt(), "GP"))
+    private val iconBmps = HashMap<String, Bitmap>()
+    private val ip = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private fun loadIcons() {
+        for (id in listOf("yt", "nf", "sp", "dp", "g", "tw")) {
+            try { act.assets.open("icon_$id.png").use { iconBmps[id] = BitmapFactory.decodeStream(it) } } catch (e: Exception) { }
+        }
+    }
 
     // ---------- estado ----------
     private var text = ""
     private var k1 = .22f; private var k2 = .08f; private var ipd = .064f
     private val head = floatArrayOf(0f, 0f, 0f)
+    private val walkOff = FloatArray(3)          // andar virtual (botoes)
+    private val arRel = FloatArray(3)            // andar real (ARCore)
+    private var pos0 = FloatArray(3); private var havePos0 = false
+    private var alphaAr = 0f; private var alphaInit = false
+    private var arInit = false; private var lastStatus = ""
+    @Volatile var ar: ArTracker? = null
+    private fun wrapA(x: Float): Float {
+        var v = x; val tp2 = 2f * PI.toFloat()
+        while (v > PI.toFloat()) v -= tp2
+        while (v < -PI.toFloat()) v += tp2
+        return v
+    }
     private var F = floatArrayOf(0f, 0f, -1f); private var R = floatArrayOf(1f, 0f, 0f); private var U = floatArrayOf(0f, 1f, 0f)
     private var hoverKey = ""
     private var uiDirty = true
@@ -178,8 +198,8 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private fun toggle(w: Win) { if (w.visible) w.visible = false else { w.visible = true; spawn(w) } }
     private fun walk(fwd: Float, side: Float) {
         val fh = norm(floatArrayOf(F[0], 0f, F[2])); val rh = norm(floatArrayOf(R[0], 0f, R[2]))
-        head[0] += (fh[0] * fwd + rh[0] * side) * .3f
-        head[2] += (fh[2] * fwd + rh[2] * side) * .3f
+        walkOff[0] += (fh[0] * fwd + rh[0] * side) * .3f
+        walkOff[2] += (fh[2] * fwd + rh[2] * side) * .3f
     }
 
     // ---------- UI desenhada em bitmaps ----------
@@ -217,29 +237,35 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         w.tDirty = false
     }
 
-    private fun icon(c: Canvas, w: Win, id: String, label: String, col: Int, r: RectF, size: Float, on: Boolean = false) {
-        p.style = Paint.Style.FILL; p.color = col; c.drawRoundRect(r, 22f, 22f, p)
+    private fun icon(c: Canvas, w: Win, id: String, label: String, col: Int, r: RectF, size: Float, on: Boolean = false, bmp: Bitmap? = null) {
+        p.style = Paint.Style.FILL; p.color = if (bmp != null) 0xFF232840.toInt() else col; c.drawRoundRect(r, 22f, 22f, p)
+        if (bmp != null) {
+            val m = r.width() * .14f
+            c.drawBitmap(bmp, null, RectF(r.left + m, r.top + m, r.right - m, r.bottom - m), ip)
+        }
         if (hoverKey == w.id + ":" + id) { p.color = 0x55FFFFFF; c.drawRoundRect(r, 22f, 22f, p) }
-        tp.textAlign = Paint.Align.CENTER; tp.textSize = size; tp.color = Color.WHITE
-        c.drawText(label, r.centerX(), r.centerY() + size * .35f, tp)
+        if (bmp == null) {
+            tp.textAlign = Paint.Align.CENTER; tp.textSize = size; tp.color = Color.WHITE
+            c.drawText(label, r.centerX(), r.centerY() + size * .35f, tp)
+        }
         if (on) { p.color = Color.WHITE; c.drawCircle(r.centerX(), r.bottom + 12f, 5f, p) }
         w.btns.add(Btn(id, r))
     }
 
     private fun drawDock() {
         val w = dock; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
-        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1200f, 128f, 64f, 64f, p)
+        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1280f, 128f, 64f, 64f, p)
         tp.textAlign = Paint.Align.LEFT; tp.textSize = 34f; tp.color = Color.WHITE
         c.drawText(java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date()), 36f, 76f, tp)
         val items = ArrayList<Triple<String, String, Int>>()
         items.add(Triple("lib", "LIB", 0xFF4A5572.toInt()))
-        for (a in appList.take(4)) items.add(Triple("app:" + a.id, a.glyph, a.color))
+        for (a in appList.take(7)) items.add(Triple("app:" + a.id, a.glyph, a.color))
         items.add(Triple("kb", "ABC", 0xFF3B82F6.toInt()))
         items.add(Triple("cfg", "AJU", 0xFF4A5572.toInt()))
         items.add(Triple("rc", "CTR", 0xFF16A34A.toInt()))
         items.forEachIndexed { i, (id, l, col) ->
             val on = (id == "lib" && apps.visible) || (id == "kb" && kb.visible) || (id == "cfg" && cfg.visible)
-            icon(c, w, id, l, col, RectF(190f + i * 100f, 14f, 270f + i * 100f, 94f), 28f, on)
+            icon(c, w, id, l, col, RectF(190f + i * 98f, 14f, 270f + i * 98f, 94f), 28f, on, iconBmps[id.removePrefix("app:")])
         }
         w.dirty = true
     }
@@ -262,10 +288,10 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         appList.forEachIndexed { i, a ->
             val x = 45f + (i % 3) * 330f; val y = 50f + (i / 3) * 220f
             val r = RectF(x, y, x + 300f, y + 190f)
-            p.color = a.color; c.drawRoundRect(r, 28f, 28f, p)
+            val ib = iconBmps[a.id]; p.color = if (ib != null) 0xFF232840.toInt() else a.color; c.drawRoundRect(r, 28f, 28f, p)
             if (hoverKey == w.id + ":app:" + a.id) { p.color = 0x55FFFFFF; c.drawRoundRect(r, 28f, 28f, p) }
             tp.textAlign = Paint.Align.CENTER; tp.color = Color.WHITE
-            tp.textSize = 64f; c.drawText(a.glyph, r.centerX(), r.centerY() + 10f, tp)
+            if (ib != null) c.drawBitmap(ib, null, RectF(r.centerX() - 60f, r.top + 18f, r.centerX() + 60f, r.top + 138f), ip) else { tp.textSize = 64f; c.drawText(a.glyph, r.centerX(), r.centerY() + 10f, tp) }
             tp.textSize = 30f; c.drawText(a.name, r.centerX(), r.bottom - 26f, tp)
             w.btns.add(Btn("app:" + a.id, r))
         }
@@ -305,7 +331,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         key(c, w, "exit", "Sair do app", RectF(520f, 540f, 960f, 624f), 32f)
         tp.textAlign = Paint.Align.LEFT; tp.textSize = 26f; tp.color = 0xFF9AA3BD.toInt()
         c.drawText("As janelas ficam fixas no mundo virtual.", 40f, 700f, tp)
-        c.drawText("Sem tracking de posicao real, use Andar.", 40f, 740f, tp)
+        c.drawText("Posicao: " + (ar?.status ?: "sem ARCore (use Andar)"), 40f, 740f, tp)
         w.dirty = true
     }
 
@@ -328,7 +354,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             id.startsWith("app:") -> appList.firstOrNull { it.id == id.substring(4) }?.let { load(it.url) }
             id == "kb" -> toggle(kb)
             id == "cfg" -> toggle(cfg)
-            id == "rc" -> needCenter = true
+            id == "rc" -> { needCenter = true; havePos0 = false }
             id == "exit" -> post { onExit() }
             id == "k1-" -> k1 = (k1 - .03f).coerceAtLeast(0f)
             id == "k1+" -> k1 = (k1 + .03f).coerceAtMost(.6f)
@@ -547,6 +573,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         setRenderer(this)
         renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         preserveEGLContextOnPause = true
+        loadIcons()
         for (w in wins) spawn(w)
         kb.visible = false; cfg.visible = false
     }
@@ -647,6 +674,29 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     override fun onDrawFrame(gl: GL10?) {
         val now = System.nanoTime(); val dt = ((now - lastT) / 1e9f).coerceAtMost(.1f); lastT = now
         updateHead()
+
+        val a = ar
+        if (a != null) {
+            if (!arInit) {
+                a.initGl()
+                @Suppress("DEPRECATION") a.setDisplay(act.windowManager.defaultDisplay.rotation, sw, sh)
+                arInit = true
+            }
+            a.update()
+            if (a.status != lastStatus) { lastStatus = a.status; uiDirty = true }
+            if (a.tracking) {
+                if (abs(F[1]) < .7f) {                      // alinha o "norte" do ARCore com o do giroscopio
+                    val d = atan2(a.fwd[0], -a.fwd[2]) - atan2(F[0], -F[2])
+                    if (!alphaInit) { alphaAr = d; alphaInit = true } else alphaAr += wrapA(d - alphaAr) * .05f
+                }
+                if (!havePos0) { pos0 = a.pos.copyOf(); havePos0 = true }
+                val rx = a.pos[0] - pos0[0]; val ry = a.pos[1] - pos0[1]; val rz = a.pos[2] - pos0[2]
+                val ca = cos(alphaAr); val sa = sin(alphaAr)
+                val tx = rx * ca + rz * sa; val tz = -rx * sa + rz * ca
+                arRel[0] += (tx - arRel[0]) * .4f; arRel[1] += (ry - arRel[1]) * .4f; arRel[2] += (tz - arRel[2]) * .4f
+            }
+        }
+        for (i in 0..2) head[i] = walkOff[i] + arRel[i]
 
         val bf = browser.poll()
         if (bf != null && browser.version != lastVer) {
