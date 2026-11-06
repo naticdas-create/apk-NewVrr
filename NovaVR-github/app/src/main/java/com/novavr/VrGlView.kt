@@ -100,10 +100,24 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     // ---------- janelas ----------
     private val browserWin = Win("web", 2.2f, 2.2f * browser.h / browser.w, browser.w, browser.h).also { it.title = "Navegador"; it.sd = 2.2f; it.sy = .2f }
-    private val bar = Win("bar", 1.6f, .2f, 1280, 160).also { it.title = "Menu"; it.sd = 1.9f; it.sy = -.95f }
+    private val dock = Win("dock", 1.5f, .16f, 1200, 128, false).also { it.sd = 1.8f; it.sy = -1.0f }
+    private val addr = Win("addr", 2.2f, .14f, 1760, 112, false).also { it.sd = 2.2f; it.sy = .93f }
+    private val apps = Win("apps", 1.3f, .9f, 1040, 720).also { it.title = "Biblioteca"; it.sd = 2.0f; it.sy = .1f; it.sa = -38f }
     private val kb = Win("kb", 1.6f, .65f, 1280, 520).also { it.title = "Teclado"; it.sd = 1.6f; it.sy = -1.1f }
-    private val cfg = Win("cfg", 1f, .8f, 1000, 800).also { it.title = "Configuracoes"; it.sd = 1.4f; it.sy = 0f; it.sa = -35f }
-    private val wins = listOf(browserWin, bar, kb, cfg)
+    private val cfg = Win("cfg", 1f, .8f, 1000, 800).also { it.title = "Configuracoes"; it.sd = 2.0f; it.sy = .1f; it.sa = 38f }
+    private val wins = listOf(browserWin, addr, dock, apps, kb, cfg)
+
+    private class App(val id: String, val name: String, val url: String, val color: Int, val glyph: String)
+    private val appList = listOf(
+        App("yt", "YouTube", "https://www.youtube.com/", 0xFFE5173F.toInt(), "YT"),
+        App("nf", "Netflix", "https://www.netflix.com/", 0xFFB20710.toInt(), "N"),
+        App("g", "Google", "https://www.google.com/", 0xFF2F7DE1.toInt(), "G"),
+        App("rb", "Roblox", "https://www.roblox.com/", 0xFFD62B2B.toInt(), "RBX"),
+        App("tw", "Twitch", "https://www.twitch.tv/", 0xFF7C5CFF.toInt(), "TW"),
+        App("pv", "Prime Video", "https://www.primevideo.com/", 0xFF1A98FF.toInt(), "PV"),
+        App("dp", "Disney+", "https://www.disneyplus.com/", 0xFF113CCF.toInt(), "D+"),
+        App("sp", "Spotify", "https://open.spotify.com/", 0xFF1DB954.toInt(), "SP"),
+        App("gp", "Globoplay", "https://globoplay.globo.com/", 0xFFEF4444.toInt(), "GP"))
 
     // ---------- estado ----------
     private var text = ""
@@ -203,14 +217,58 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         w.tDirty = false
     }
 
-    private fun drawBar() {
-        val w = bar; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
-        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1280f, 160f, 80f, 80f, p)
-        p.color = 0xFF2A3050.toInt(); c.drawRoundRect(30f, 30f, 560f, 130f, 50f, 50f, p)
+    private fun icon(c: Canvas, w: Win, id: String, label: String, col: Int, r: RectF, size: Float, on: Boolean = false) {
+        p.style = Paint.Style.FILL; p.color = col; c.drawRoundRect(r, 22f, 22f, p)
+        if (hoverKey == w.id + ":" + id) { p.color = 0x55FFFFFF; c.drawRoundRect(r, 22f, 22f, p) }
+        tp.textAlign = Paint.Align.CENTER; tp.textSize = size; tp.color = Color.WHITE
+        c.drawText(label, r.centerX(), r.centerY() + size * .35f, tp)
+        if (on) { p.color = Color.WHITE; c.drawCircle(r.centerX(), r.bottom + 12f, 5f, p) }
+        w.btns.add(Btn(id, r))
+    }
+
+    private fun drawDock() {
+        val w = dock; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
+        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1200f, 128f, 64f, 64f, p)
         tp.textAlign = Paint.Align.LEFT; tp.textSize = 34f; tp.color = Color.WHITE
-        c.drawText(if (text.isEmpty()) "Digite um endereco ou busca" else text.takeLast(24), 56f, 92f, tp)
-        listOf("back" to "<", "yt" to "YT", "g" to "G", "rb" to "RBX", "kb" to "ABC", "rc" to "CTR", "cfg" to "AJU")
-            .forEachIndexed { i, (id, l) -> key(c, w, id, l, RectF(580f + i * 98f, 30f, 668f + i * 98f, 130f), 30f) }
+        c.drawText(java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date()), 36f, 76f, tp)
+        val items = ArrayList<Triple<String, String, Int>>()
+        items.add(Triple("lib", "LIB", 0xFF4A5572.toInt()))
+        for (a in appList.take(4)) items.add(Triple("app:" + a.id, a.glyph, a.color))
+        items.add(Triple("kb", "ABC", 0xFF3B82F6.toInt()))
+        items.add(Triple("cfg", "AJU", 0xFF4A5572.toInt()))
+        items.add(Triple("rc", "CTR", 0xFF16A34A.toInt()))
+        items.forEachIndexed { i, (id, l, col) ->
+            val on = (id == "lib" && apps.visible) || (id == "kb" && kb.visible) || (id == "cfg" && cfg.visible)
+            icon(c, w, id, l, col, RectF(190f + i * 100f, 14f, 270f + i * 100f, 94f), 28f, on)
+        }
+        w.dirty = true
+    }
+
+    private fun drawAddr() {
+        val w = addr; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
+        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1760f, 112f, 56f, 56f, p)
+        key(c, w, "back", "<", RectF(20f, 16f, 110f, 96f), 34f)
+        p.style = Paint.Style.FILL; p.color = 0xFF2A3050.toInt(); c.drawRoundRect(130f, 16f, 1560f, 96f, 40f, 40f, p)
+        w.btns.add(Btn("kb", RectF(130f, 16f, 1560f, 96f)))
+        tp.textAlign = Paint.Align.LEFT; tp.textSize = 34f; tp.color = if (text.isEmpty()) 0xFF9AA3BD.toInt() else Color.WHITE
+        c.drawText(if (text.isEmpty()) "Toque aqui para digitar um endereco ou busca" else text.takeLast(60), 160f, 68f, tp)
+        key(c, w, "go", "Ir", RectF(1580f, 16f, 1740f, 96f), 34f)
+        w.dirty = true
+    }
+
+    private fun drawApps() {
+        val w = apps; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
+        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1040f, 720f, 40f, 40f, p)
+        appList.forEachIndexed { i, a ->
+            val x = 45f + (i % 3) * 330f; val y = 50f + (i / 3) * 220f
+            val r = RectF(x, y, x + 300f, y + 190f)
+            p.color = a.color; c.drawRoundRect(r, 28f, 28f, p)
+            if (hoverKey == w.id + ":app:" + a.id) { p.color = 0x55FFFFFF; c.drawRoundRect(r, 28f, 28f, p) }
+            tp.textAlign = Paint.Align.CENTER; tp.color = Color.WHITE
+            tp.textSize = 64f; c.drawText(a.glyph, r.centerX(), r.centerY() + 10f, tp)
+            tp.textSize = 30f; c.drawText(a.name, r.centerX(), r.bottom - 26f, tp)
+            w.btns.add(Btn("app:" + a.id, r))
+        }
         w.dirty = true
     }
 
@@ -265,9 +323,9 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private fun onButton(id: String) {
         when {
             id == "back" -> post { browser.back() }
-            id == "yt" -> load("https://www.youtube.com/")
-            id == "g" -> load("https://www.google.com/")
-            id == "rb" -> load("https://www.roblox.com/")
+            id == "lib" -> toggle(apps)
+            id == "go" -> go()
+            id.startsWith("app:") -> appList.firstOrNull { it.id == id.substring(4) }?.let { load(it.url) }
             id == "kb" -> toggle(kb)
             id == "cfg" -> toggle(cfg)
             id == "rc" -> needCenter = true
@@ -337,8 +395,8 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             val ws = w.w * w.scale; val hs = w.h * w.scale; val th = w.thM
             if (abs(ph.lx) > ws / 2) continue
             if (abs(ph.ly) <= hs / 2) best = ph
-            else if (w.hasTitle && ph.ly > hs / 2 && ph.ly <= hs / 2 + th)
-                best = Hit(w, true, (ph.lx / ws + .5f) * w.tbw, (1f - (ph.ly - hs / 2) / th) * w.tbh, ph.t, ph.lx, ph.ly)
+            else if (w.hasTitle && ph.ly < -hs / 2 && ph.ly >= -hs / 2 - th)
+                best = Hit(w, true, (ph.lx / ws + .5f) * w.tbw, ((-hs / 2 - ph.ly) / th) * w.tbh, ph.t, ph.lx, ph.ly)
         }
         return best
     }
@@ -551,7 +609,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         fillModel(m, w, ws, hs, 0f); GLM.multiplyMM(mvp, 0, vp, 0, m, 0)
         if (w.tex != 0) drawQuad(mvp, w.tex, 0f, 0f, w.uScale, 1f, 1f)
         if (w.hasTitle && w.tTex != 0) {
-            fillModel(m, w, ws, w.thM, hs / 2f + w.thM / 2f); GLM.multiplyMM(mvp, 0, vp, 0, m, 0)
+            fillModel(m, w, ws, w.thM, -(hs / 2f + w.thM / 2f)); GLM.multiplyMM(mvp, 0, vp, 0, m, 0)
             drawQuad(mvp, w.tTex, 0f, 0f, 1f, 1f, 1f)
         }
     }
@@ -606,7 +664,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         }
 
         interact(dt)
-        if (uiDirty) { uiDirty = false; drawBar(); drawKb(); drawCfg(); for (w in wins) w.tDirty = true }
+        if (uiDirty) { uiDirty = false; drawDock(); drawAddr(); drawApps(); drawKb(); drawCfg(); for (w in wins) w.tDirty = true }
         drawOverlay()
         ovBmp?.let { ovTex = up(ovTex, it) }
         for (w in wins) {
