@@ -132,17 +132,6 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private var k1 = .22f; private var k2 = .08f; private var ipd = .064f
     private val head = floatArrayOf(0f, 0f, 0f)
     private val walkOff = FloatArray(3)          // andar virtual (botoes)
-    private val arRel = FloatArray(3)            // andar real (ARCore)
-    private var pos0 = FloatArray(3); private var havePos0 = false
-    private var alphaAr = 0f; private var alphaInit = false
-    private var arInit = false; private var lastStatus = ""
-    @Volatile var ar: ArTracker? = null
-    private fun wrapA(x: Float): Float {
-        var v = x; val tp2 = 2f * PI.toFloat()
-        while (v > PI.toFloat()) v -= tp2
-        while (v < -PI.toFloat()) v += tp2
-        return v
-    }
     private var F = floatArrayOf(0f, 0f, -1f); private var R = floatArrayOf(1f, 0f, 0f); private var U = floatArrayOf(0f, 1f, 0f)
     private var hoverKey = ""
     private var uiDirty = true
@@ -327,11 +316,12 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         listOf("fw" to "Frente", "bk" to "Tras", "lf" to "Esq", "rt" to "Dir").forEachIndexed { i, (id, l) ->
             key(c, w, id, l, RectF(40f + i * 230f, 400f, 250f + i * 230f, 484f), 30f)
         }
-        key(c, w, "rc", "Recentrar", RectF(40f, 540f, 480f, 624f), 32f)
-        key(c, w, "exit", "Sair do app", RectF(520f, 540f, 960f, 624f), 32f)
+        key(c, w, "rc", "Recentrar", RectF(40f, 540f, 340f, 624f), 30f)
+        key(c, w, "mode", if (touchMode) "Modo: Toque" else "Modo: Laser", RectF(360f, 540f, 660f, 624f), 28f)
+        key(c, w, "exit", "Sair", RectF(680f, 540f, 960f, 624f), 30f)
         tp.textAlign = Paint.Align.LEFT; tp.textSize = 26f; tp.color = 0xFF9AA3BD.toInt()
         c.drawText("As janelas ficam fixas no mundo virtual.", 40f, 700f, tp)
-        c.drawText("Posicao: " + (ar?.status ?: "sem ARCore (use Andar)"), 40f, 740f, tp)
+        c.drawText("Sem tracking de posicao real, use Andar.", 40f, 740f, tp)
         w.dirty = true
     }
 
@@ -354,7 +344,8 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             id.startsWith("app:") -> appList.firstOrNull { it.id == id.substring(4) }?.let { load(it.url) }
             id == "kb" -> toggle(kb)
             id == "cfg" -> toggle(cfg)
-            id == "rc" -> { needCenter = true; havePos0 = false }
+            id == "rc" -> needCenter = true
+            id == "mode" -> touchMode = !touchMode
             id == "exit" -> post { onExit() }
             id == "k1-" -> k1 = (k1 - .03f).coerceAtLeast(0f)
             id == "k1+" -> k1 = (k1 + .03f).coerceAtMost(.6f)
@@ -382,6 +373,8 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private val ptrs = ArrayList<Ptr>()
     private val sx = FloatArray(2); private val sy = FloatArray(2); private val sOn = BooleanArray(2)
+    private var touchMode = true                                   // true = toque com o dedo; false = laser + pinca
+    private val palmBase = FloatArray(2); private val palmNow = FloatArray(2); private val pushOn = BooleanArray(2)
     private var cropL = 0f; private var cropT = 0f; private var cropS = 1f
     private var cu0 = 0f; private var cv0 = 0f; private var cus = 1f; private var cvs = 1f
 
@@ -449,10 +442,19 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             val ox = (X(4) + X(8)) / 2f; val oy = (Y(4) + Y(8)) / 2f
             var dx = X(5) - X(0); var dy = Y(5) - Y(0)             // punho -> base do indicador
             val n = hypot(dx, dy).coerceAtLeast(1f); dx /= n; dy /= n
-            val tx0 = ox + dx * ew * .35f; val ty0 = oy + dy * ew * .35f
-            if (!sOn[k]) { sx[k] = tx0; sy[k] = ty0 } else { sx[k] += (tx0 - sx[k]) * .3f; sy[k] += (ty0 - sy[k]) * .3f }
+            val tipX = X(8); val tipY = Y(8)                          // ponta do indicador
+            val palm = hypot(X(5) - X(17), Y(5) - Y(17)).coerceAtLeast(5f)  // largura da mao (cresce ao aproximar da camera)
+            if (!sOn[k]) { palmBase[k] = palm; palmNow[k] = palm; pushOn[k] = false }
+            else { palmNow[k] += (palm - palmNow[k]) * .5f; palmBase[k] += (palmNow[k] - palmBase[k]) * .04f }
+            val ratio = palmNow[k] / palmBase[k]
+            pushOn[k] = if (pushOn[k]) ratio > 1.07f else ratio > 1.16f
+            val tx0 = if (touchMode) tipX else ox + dx * ew * .35f
+            val ty0 = if (touchMode) tipY else oy + dy * ew * .35f
+            val sm = if (touchMode) .55f else .3f
+            if (!sOn[k]) { sx[k] = tx0; sy[k] = ty0 } else { sx[k] += (tx0 - sx[k]) * sm; sy[k] += (ty0 - sy[k]) * sm }
             sOn[k] = true; seen[k] = true
-            ptrs.add(Ptr(hd, ox, oy, sx[k], sy[k], hd.pinch))
+            val press = hd.pinch || (touchMode && pushOn[k])
+            ptrs.add(Ptr(hd, if (touchMode) tipX else ox, if (touchMode) tipY else oy, sx[k], sy[k], press))
         }
         for (k in 0..1) if (!seen[k]) sOn[k] = false
         val act = ptrs.firstOrNull { it.pinch } ?: ptrs.firstOrNull()
@@ -526,7 +528,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         val ew = fw / 2f; val eh = fh.toFloat()
         c.translate(b.width / 2f, b.height / 2f); c.scale(b.width / ew, b.height / eh)
         tp.textAlign = Paint.Align.CENTER; tp.textSize = 26f; tp.color = Color.WHITE
-        c.drawText("camera: " + (if (cam != null) "ok" else "nao") + "   maos: " + hands.size + (if (pinching) "   PINCA" else ""), 0f, -eh / 2f + 60f, tp)
+        c.drawText("camera: " + (if (cam != null) "ok" else "nao") + "   maos: " + hands.size + (if (touchMode) "   toque" else "   laser") + (if (pinching) "   CLIQUE" else ""), 0f, -eh / 2f + 60f, tp)
         val cb = cam ?: return
         for (q in ptrs) {
             fun X(i: Int) = (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
@@ -534,7 +536,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             val palm = hypot(X(0) - X(9), Y(0) - Y(9)).coerceAtLeast(20f)
             hp.shader = null
             hp.style = Paint.Style.STROKE; hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
-            hp.color = 0x773F5F7F; hp.strokeWidth = palm * .26f
+            hp.color = 0xCC3F5F7F.toInt(); hp.strokeWidth = palm * .26f
             for (ch in chains) {
                 val path = Path(); path.moveTo(X(ch[0]), Y(ch[0]))
                 for (k in 1 until ch.size) path.lineTo(X(ch[k]), Y(ch[k]))
@@ -545,7 +547,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             pm.close(); hp.style = Paint.Style.FILL; c.drawPath(pm, hp)
             val col = if (q.pinch) 0xFF22C55E.toInt() else 0xFFFFFFFF.toInt()
             hp.style = Paint.Style.STROKE
-            hp.shader = LinearGradient(q.ox, q.oy, q.tx, q.ty, col, col and 0x00FFFFFF, Shader.TileMode.CLAMP)
+            hp.shader = LinearGradient(q.ox, q.oy, q.tx + .5f, q.ty + .5f, col, col and 0x00FFFFFF, Shader.TileMode.CLAMP)
             hp.strokeWidth = 18f; hp.alpha = 70; c.drawLine(q.ox, q.oy, q.tx, q.ty, hp)
             hp.strokeWidth = 6f; hp.alpha = 255; c.drawLine(q.ox, q.oy, q.tx, q.ty, hp)
             hp.shader = null
@@ -675,28 +677,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         val now = System.nanoTime(); val dt = ((now - lastT) / 1e9f).coerceAtMost(.1f); lastT = now
         updateHead()
 
-        val a = ar
-        if (a != null) {
-            if (!arInit) {
-                a.initGl()
-                @Suppress("DEPRECATION") a.setDisplay(act.windowManager.defaultDisplay.rotation, sw, sh)
-                arInit = true
-            }
-            a.update()
-            if (a.status != lastStatus) { lastStatus = a.status; uiDirty = true }
-            if (a.tracking) {
-                if (abs(F[1]) < .7f) {                      // alinha o "norte" do ARCore com o do giroscopio
-                    val d = atan2(a.fwd[0], -a.fwd[2]) - atan2(F[0], -F[2])
-                    if (!alphaInit) { alphaAr = d; alphaInit = true } else alphaAr += wrapA(d - alphaAr) * .05f
-                }
-                if (!havePos0) { pos0 = a.pos.copyOf(); havePos0 = true }
-                val rx = a.pos[0] - pos0[0]; val ry = a.pos[1] - pos0[1]; val rz = a.pos[2] - pos0[2]
-                val ca = cos(alphaAr); val sa = sin(alphaAr)
-                val tx = rx * ca + rz * sa; val tz = -rx * sa + rz * ca
-                arRel[0] += (tx - arRel[0]) * .4f; arRel[1] += (ry - arRel[1]) * .4f; arRel[2] += (tz - arRel[2]) * .4f
-            }
-        }
-        for (i in 0..2) head[i] = walkOff[i] + arRel[i]
+        for (i in 0..2) head[i] = walkOff[i]
 
         val bf = browser.poll()
         if (bf != null && browser.version != lastVer) {
