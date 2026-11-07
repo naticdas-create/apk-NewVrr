@@ -507,6 +507,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private val prevMid = BooleanArray(2); private val prevRing = BooleanArray(2); private val prevPinky = BooleanArray(2)
     private var prevHostPinch = false; private var menuShownPrev = false
     private val sx = FloatArray(2); private val sy = FloatArray(2); private val sOn = BooleanArray(2)
+    private val prevPress = BooleanArray(2)                         // estado do clique no quadro anterior (trava o ponteiro)
     private var touchMode = true                                   // true = toque com o dedo; false = laser + pinca
     private val palmBase = FloatArray(2); private val palmNow = FloatArray(2); private val pushOn = BooleanArray(2)
     private var cropL = 0f; private var cropT = 0f; private var cropS = 1f
@@ -559,7 +560,13 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         return best
     }
 
-    private fun btnAt(h: Hit): String? = (if (h.title) h.win.tbBtns else h.win.btns).firstOrNull { it.r.contains(h.bx, h.by) }?.id
+    /** Botao sob o ponto, com tolerancia extra (14 px nos botoes, 10 px na barra de titulo) para facilitar o toque. */
+    private fun btnAt(h: Hit): String? {
+        val list = if (h.title) h.win.tbBtns else h.win.btns
+        list.firstOrNull { it.r.contains(h.bx, h.by) }?.let { return it.id }
+        val m = if (h.title) 10f else 14f
+        return list.firstOrNull { RectF(it.r.left - m, it.r.top - m, it.r.right + m, it.r.bottom + m).contains(h.bx, h.by) }?.id
+    }
 
     private fun activate(h: Hit, allowTouch: Boolean) {
         val id = btnAt(h)
@@ -590,13 +597,19 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             pushOn[k] = if (pushOn[k]) ratio > 1.07f else ratio > 1.16f
             val tx0 = if (touchMode) tipX else ox + dx * ew * .35f
             val ty0 = if (touchMode) tipY else oy + dy * ew * .35f
-            val sm = if (touchMode) .55f else .3f
+            // suavizacao adaptativa: parado = firme, rapido = responsivo; durante o clique o ponteiro trava
+            val dist = hypot(tx0 - sx[k], ty0 - sy[k])
+            val speed = (dist / (palm * .6f)).coerceIn(0f, 1f)
+            val base = if (touchMode) .30f else .22f
+            var sm = base + (.85f - base) * speed
+            if (prevPress[k]) sm = minOf(sm, .12f)
             if (!sOn[k]) { sx[k] = tx0; sy[k] = ty0 } else { sx[k] += (tx0 - sx[k]) * sm; sy[k] += (ty0 - sy[k]) * sm }
             sOn[k] = true; seen[k] = true
             val press = hd.pinch || (touchMode && pushOn[k])
+            prevPress[k] = press
             ptrs.add(Ptr(hd, if (touchMode) tipX else ox, if (touchMode) tipY else oy, sx[k], sy[k], press, k))
         }
-        for (k in 0..1) if (!seen[k]) sOn[k] = false
+        for (k in 0..1) if (!seen[k]) { sOn[k] = false; prevPress[k] = false }
         // a mao nao dominante abre o menu nas pontas dos dedos; a dominante aponta e clica
         var host: Ptr? = null; var pointer: Ptr? = null
         if (ptrs.size >= 2) {
@@ -744,6 +757,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private var ovTex = 0
     private val chains = arrayOf(intArrayOf(0, 1, 2, 3, 4), intArrayOf(0, 5, 6, 7, 8), intArrayOf(0, 9, 10, 11, 12),
         intArrayOf(0, 13, 14, 15, 16), intArrayOf(0, 17, 18, 19, 20))
+    private val tipIdx = intArrayOf(4, 8, 12, 16, 20)
 
     private fun drawOverlay() {
         val b = ovBmp ?: return
@@ -761,9 +775,9 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             fun X(i: Int) = (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
             fun Y(i: Int) = (q.hand.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
             val palm = hypot(X(0) - X(9), Y(0) - Y(9)).coerceAtLeast(20f)
-            // mao: dedos que afinam para as pontas, brilho suave, linha fina clara nas bordas e interior em degrade
+            // mao: dedos que afinam para as pontas
             val w0 = palm * .26f
-            val ow = (palm * .025f).coerceIn(2f, 4f)
+            val ow = (palm * .02f).coerceIn(1.5f, 3f)                 // contorno fino
             val segs = ArrayList<FloatArray>()
             for ((ci, ch) in chains.withIndex()) {
                 for (k in 0 until ch.size - 1) {
@@ -777,22 +791,33 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             pm.close()
             hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
             hp.shader = null
-            val rimCol = if (q === hostP && menuBtns.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xCCE6E6E6.toInt()
+
+            // 1) contorno preto fino e fraco na mao inteira: desenhado opaco numa camada propria
+            //    e composto com alpha baixo (assim as juntas dos dedos nao ficam mais escuras)
+            @Suppress("DEPRECATION")
+            c.saveLayerAlpha(-ew, -eh, ew, eh, 110)
+            hp.color = Color.BLACK
             hp.style = Paint.Style.STROKE
-            hp.color = 0x22AEB8FF                                           // 0) brilho suave (duas camadas, sem desfoque)
-            for (sg in segs) { hp.strokeWidth = sg[4] + 2f * ow + 18f; c.drawLine(sg[0], sg[1], sg[2], sg[3], hp) }
-            hp.color = 0x33AEB8FF
-            for (sg in segs) { hp.strokeWidth = sg[4] + 2f * ow + 8f; c.drawLine(sg[0], sg[1], sg[2], sg[3], hp) }
-            hp.color = rimCol                                               // 1) linha fina clara nas bordas
             for (sg in segs) { hp.strokeWidth = sg[4] + 2f * ow; c.drawLine(sg[0], sg[1], sg[2], sg[3], hp) }
             hp.style = Paint.Style.FILL_AND_STROKE; hp.strokeWidth = 2f * ow
             c.drawPath(pm, hp)
-            hp.shader = LinearGradient(X(0), Y(0), X(12) + .5f, Y(12) + .5f,   // 2) interior em degrade
-                0xFF000000.toInt(), 0xFF7A7A7A.toInt(), Shader.TileMode.CLAMP)
+            c.restore()
+
+            // 2) corpo da mao com degrade invertido (cinza no punho -> preto nas pontas), por cima do contorno
+            hp.shader = LinearGradient(X(0), Y(0), X(12) + .5f, Y(12) + .5f,
+                0xFF7A7A7A.toInt(), 0xFF000000.toInt(), Shader.TileMode.CLAMP)
             hp.style = Paint.Style.STROKE
             for (sg in segs) { hp.strokeWidth = sg[4]; c.drawLine(sg[0], sg[1], sg[2], sg[3], hp) }
             hp.style = Paint.Style.FILL; c.drawPath(pm, hp)
             hp.shader = null
+
+            // 3) reflexo pequeno na polpa das pontas (verde no polegar e indicador durante a pinca)
+            hp.style = Paint.Style.FILL
+            for (ti in tipIdx) {
+                hp.color = if (q.pinch && (ti == 4 || ti == 8)) 0xCC22C55E.toInt() else 0x33FFFFFF
+                c.drawCircle(X(ti), Y(ti), palm * .055f, hp)
+            }
+
             if (q === pointerP && !(menuBtns.isNotEmpty() && pointerP === hostP)) {
             val col = if (q.pinch) 0xFF22C55E.toInt() else 0xFFFFFFFF.toInt()
             hp.style = Paint.Style.STROKE
