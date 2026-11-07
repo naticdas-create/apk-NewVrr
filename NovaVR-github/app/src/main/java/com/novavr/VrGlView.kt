@@ -63,9 +63,45 @@ class Win(val id: String, val w: Float, val h: Float, val bw: Int, val bh: Int, 
     var sd = 2f      // distancia ao abrir
     var sy = 0f      // altura ao abrir
     var sa = 0f      // angulo ao abrir (graus)
+    var anim = 0f                // 0..1: animacao de abrir/fechar
+    var glow = 0f                // 0..1: brilho da borda quando apontada
+    var rad = .06f               // raio dos cantos (metros)
     val thM get() = 0.1f * scale
 }
 
+private const val CURVE_R = 3.5f   // raio da curvatura das janelas (metros), como no Quest
+
+private const val VS_W = """
+attribute vec2 aPos; uniform mat4 uMVP; uniform vec4 uUV; uniform float uBend; varying vec2 vUV; varying vec2 vLocal;
+void main(){ vLocal = aPos;
+  gl_Position = uMVP * vec4(aPos.x, aPos.y, aPos.x * aPos.x * uBend, 1.0);
+  vUV = uUV.xy + vec2(aPos.x + 0.5, 0.5 - aPos.y) * uUV.zw; }"""
+private const val FS_W = """
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+uniform sampler2D uTex; uniform float uA; uniform vec2 uQuad; uniform vec2 uBox; uniform float uRad; uniform float uGlow; uniform float uShadow;
+varying vec2 vUV; varying vec2 vLocal;
+float sdBox(vec2 p, vec2 b, float r){ vec2 q = abs(p) - b + vec2(r); return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }
+void main(){
+  vec2 p = vLocal * uQuad;
+  float d = sdBox(p, uBox * 0.5, uRad);
+  if (uShadow > 0.5) {
+    float a = (1.0 - smoothstep(-0.01, 0.075, d)) * 0.5 * uA;
+    gl_FragColor = vec4(0.0, 0.0, 0.0, a);
+    return;
+  }
+  float aa = 1.0 - smoothstep(-0.003, 0.003, d);
+  vec4 c = texture2D(uTex, vUV);
+  float rim = smoothstep(-0.014, -0.002, d);
+  float k = rim * (0.16 + 0.55 * uGlow);
+  vec3 rc = vec3(0.90, 0.92, 1.0);
+  c.rgb = c.rgb * (1.0 - k) + rc * k * max(c.a, 0.5);
+  c.a = max(c.a, k * 0.5);
+  gl_FragColor = c * aa * uA;
+}"""
 private const val VS_Q = """
 attribute vec2 aPos; uniform mat4 uMVP; uniform vec4 uUV; varying vec2 vUV;
 void main(){ gl_Position = uMVP * vec4(aPos, 0.0, 1.0);
@@ -100,12 +136,12 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     @Volatile var hands: List<Hand> = emptyList()
 
     // ---------- janelas ----------
-    private val browserWin = Win("web", 2.2f, 2.2f * browser.h / browser.w, browser.w, browser.h).also { it.title = "Navegador"; it.sd = 2.2f; it.sy = .2f }
-    private val dock = Win("dock", 1.6f, .16f, 1280, 128, false).also { it.sd = 1.8f; it.sy = -1.0f }
-    private val addr = Win("addr", 2.2f, .14f, 1760, 112, false).also { it.sd = 2.2f; it.sy = .93f }
-    private val apps = Win("apps", 1.3f, .9f, 1040, 720).also { it.title = "Biblioteca"; it.sd = 2.0f; it.sy = .1f; it.sa = -38f }
-    private val kb = Win("kb", 1.6f, .65f, 1280, 520).also { it.title = "Teclado"; it.sd = 1.6f; it.sy = -1.1f }
-    private val cfg = Win("cfg", 1f, .8f, 1000, 800).also { it.title = "Configuracoes"; it.sd = 2.0f; it.sy = .1f; it.sa = 38f }
+    private val browserWin = Win("web", 2.2f, 2.2f * browser.h / browser.w, browser.w, browser.h).also { it.title = "Navegador"; it.sd = 2.2f; it.sy = .2f; it.rad = .07f }
+    private val dock = Win("dock", 1.6f, .16f, 1280, 128, false).also { it.sd = 1.8f; it.sy = -1.0f; it.rad = .08f }
+    private val addr = Win("addr", 2.2f, .14f, 1760, 112, false).also { it.sd = 2.2f; it.sy = .93f; it.rad = .07f }
+    private val apps = Win("apps", 1.3f, .9f, 1040, 720).also { it.title = "Biblioteca"; it.sd = 2.0f; it.sy = .1f; it.sa = -38f; it.rad = .07f }
+    private val kb = Win("kb", 1.6f, .65f, 1280, 520).also { it.title = "Teclado"; it.sd = 1.6f; it.sy = -1.1f; it.rad = .06f }
+    private val cfg = Win("cfg", 1f, .8f, 1000, 800).also { it.title = "Configuracoes"; it.sd = 2.0f; it.sy = .1f; it.sa = 38f; it.rad = .06f }
     private val wins = listOf(browserWin, addr, dock, apps, kb, cfg)
 
     private class App(val id: String, val name: String, val url: String, val color: Int, val glyph: String)
@@ -217,12 +253,29 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val hp = Paint(Paint.ANTI_ALIAS_FLAG)
 
+    /** Fundo de vidro escuro com degrade e borda fina, como os paineis do Quest. */
+    private fun panelBg(c: Canvas, w: Int, h: Int, r: Float) {
+        p.style = Paint.Style.FILL
+        p.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), 0xF2202540.toInt(), 0xF2121626.toInt(), Shader.TileMode.CLAMP)
+        c.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), r, r, p)
+        p.shader = null
+        p.style = Paint.Style.STROKE; p.strokeWidth = 3f; p.color = 0x33FFFFFF
+        c.drawRoundRect(1.5f, 1.5f, w - 1.5f, h - 1.5f, r, r, p)
+        p.style = Paint.Style.FILL
+    }
+
     private fun ensure(w: Win): Bitmap = w.bmp ?: Bitmap.createBitmap(w.bw, w.bh, Bitmap.Config.ARGB_8888).also { w.bmp = it }
 
     private fun key(c: Canvas, w: Win, id: String, label: String, r: RectF, size: Float = 36f) {
+        val hot = hoverKey == w.id + ":" + id
         p.style = Paint.Style.FILL
-        p.color = if (hoverKey == w.id + ":" + id) 0xFF7C5CFF.toInt() else 0xFF2A3050.toInt()
-        c.drawRoundRect(r, 18f, 18f, p)
+        p.shader = LinearGradient(r.left, r.top, r.left, r.bottom,
+            if (hot) 0xFFA386FF.toInt() else 0xFF363D63.toInt(), if (hot) 0xFF6A4BEA.toInt() else 0xFF252B49.toInt(), Shader.TileMode.CLAMP)
+        c.drawRoundRect(r, 22f, 22f, p)
+        p.shader = null
+        p.style = Paint.Style.STROKE; p.strokeWidth = 2f; p.color = if (hot) 0x88FFFFFF.toInt() else 0x22FFFFFF
+        c.drawRoundRect(r, 22f, 22f, p)
+        p.style = Paint.Style.FILL
         tp.textAlign = Paint.Align.CENTER; tp.textSize = size; tp.color = Color.WHITE
         c.drawText(label, r.centerX(), r.centerY() + size * .35f, tp)
         w.btns.add(Btn(id, r))
@@ -231,29 +284,49 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private fun drawTitle(w: Win) {
         val b = w.tBmp ?: Bitmap.createBitmap(w.tbw, w.tbh, Bitmap.Config.ARGB_8888).also { w.tBmp = it }
         b.eraseColor(0); val c = Canvas(b); w.tbBtns.clear()
-        p.style = Paint.Style.FILL; p.color = 0xEE1A1F30.toInt()
-        c.drawRoundRect(0f, 0f, w.tbw.toFloat(), w.tbh.toFloat(), 24f, 24f, p)
-        tp.textAlign = Paint.Align.LEFT; tp.textSize = 30f; tp.color = Color.WHITE
-        c.drawText(w.title, 24f, 40f, tp)
-        listOf("size" to "<>", "min" to "-", "close" to "X").forEachIndexed { i, (id, l) ->
-            val left = w.tbw - 62f - (2 - i) * 62f
-            val r = RectF(left, 4f, left + 54f, 56f)
-            p.color = if (hoverKey == w.id + ":" + id) 0xFF7C5CFF.toInt() else 0xFF2A3050.toInt()
-            c.drawRoundRect(r, 14f, 14f, p)
-            tp.textAlign = Paint.Align.CENTER; tp.textSize = 28f
-            c.drawText(l, r.centerX(), r.centerY() + 10f, tp)
+        panelBg(c, w.tbw, w.tbh, w.tbh / 2f)
+        tp.textAlign = Paint.Align.CENTER; tp.textSize = 28f; tp.color = 0xFFDDE2F5.toInt()
+        c.drawText(w.title, w.tbw / 2f, 40f, tp)
+        listOf("size", "min", "close").forEachIndexed { i, id ->
+            val left = w.tbw - 66f - (2 - i) * 58f
+            val r = RectF(left, 6f, left + 48f, 54f)
+            val hot = hoverKey == w.id + ":" + id
+            p.style = Paint.Style.FILL
+            p.color = if (hot) (if (id == "close") 0xFFE5484D.toInt() else 0xFF7C5CFF.toInt()) else 0xFF2B3150.toInt()
+            c.drawCircle(r.centerX(), r.centerY(), 24f, p)
+            val cx = r.centerX(); val cy = r.centerY(); val q = 9f
+            p.style = Paint.Style.STROKE; p.strokeWidth = 4f; p.strokeCap = Paint.Cap.ROUND; p.color = Color.WHITE
+            when (id) {
+                "close" -> { c.drawLine(cx - q, cy - q, cx + q, cy + q, p); c.drawLine(cx - q, cy + q, cx + q, cy - q, p) }
+                "min" -> c.drawLine(cx - q, cy, cx + q, cy, p)
+                else -> {
+                    c.drawLine(cx - q, cy + q, cx + q, cy - q, p)
+                    c.drawLine(cx + q, cy - q, cx + q - 8f, cy - q, p); c.drawLine(cx + q, cy - q, cx + q, cy - q + 8f, p)
+                    c.drawLine(cx - q, cy + q, cx - q + 8f, cy + q, p); c.drawLine(cx - q, cy + q, cx - q, cy + q - 8f, p)
+                }
+            }
+            p.style = Paint.Style.FILL
             w.tbBtns.add(Btn(id, r))
         }
         w.tDirty = false
     }
 
     private fun icon(c: Canvas, w: Win, id: String, label: String, col: Int, r: RectF, size: Float, on: Boolean = false, bmp: Bitmap? = null) {
-        p.style = Paint.Style.FILL; p.color = if (bmp != null) 0xFF232840.toInt() else col; c.drawRoundRect(r, 22f, 22f, p)
+        val hot = hoverKey == w.id + ":" + id
+        val g = if (hot) 6f else 0f
+        val rr = RectF(r.left - g, r.top - g, r.right + g, r.bottom + g)
+        p.style = Paint.Style.FILL
+        if (bmp != null) p.shader = LinearGradient(rr.left, rr.top, rr.left, rr.bottom, 0xFF2E3558.toInt(), 0xFF1B2038.toInt(), Shader.TileMode.CLAMP)
+        else p.color = col
+        c.drawRoundRect(rr, 24f, 24f, p)
+        p.shader = null
         if (bmp != null) {
-            val m = r.width() * .14f
-            c.drawBitmap(bmp, null, RectF(r.left + m, r.top + m, r.right - m, r.bottom - m), ip)
+            val m = rr.width() * .14f
+            c.drawBitmap(bmp, null, RectF(rr.left + m, rr.top + m, rr.right - m, rr.bottom - m), ip)
         }
-        if (hoverKey == w.id + ":" + id) { p.color = 0x55FFFFFF; c.drawRoundRect(r, 22f, 22f, p) }
+        p.style = Paint.Style.STROKE; p.strokeWidth = if (hot) 4f else 2f; p.color = if (hot) 0xFFB9A6FF.toInt() else 0x33FFFFFF
+        c.drawRoundRect(rr, 24f, 24f, p)
+        p.style = Paint.Style.FILL
         if (bmp == null) {
             tp.textAlign = Paint.Align.CENTER; tp.textSize = size; tp.color = Color.WHITE
             c.drawText(label, r.centerX(), r.centerY() + size * .35f, tp)
@@ -264,7 +337,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private fun drawDock() {
         val w = dock; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
-        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1280f, 128f, 64f, 64f, p)
+        panelBg(c, 1280, 128, 64f)
         tp.textAlign = Paint.Align.LEFT; tp.textSize = 34f; tp.color = Color.WHITE
         c.drawText(java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date()), 36f, 76f, tp)
         val items = ArrayList<Triple<String, String, Int>>()
@@ -282,9 +355,9 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private fun drawAddr() {
         val w = addr; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
-        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1760f, 112f, 56f, 56f, p)
+        panelBg(c, 1760, 112, 56f)
         key(c, w, "back", "<", RectF(20f, 16f, 110f, 96f), 34f)
-        p.style = Paint.Style.FILL; p.color = 0xFF2A3050.toInt(); c.drawRoundRect(130f, 16f, 1560f, 96f, 40f, 40f, p)
+        p.style = Paint.Style.FILL; p.color = 0xFF151929.toInt(); c.drawRoundRect(130f, 16f, 1560f, 96f, 40f, 40f, p)
         w.btns.add(Btn("kb", RectF(130f, 16f, 1560f, 96f)))
         tp.textAlign = Paint.Align.LEFT; tp.textSize = 34f; tp.color = if (text.isEmpty()) 0xFF9AA3BD.toInt() else Color.WHITE
         c.drawText(if (text.isEmpty()) "Toque aqui para digitar um endereco ou busca" else text.takeLast(60), 160f, 68f, tp)
@@ -294,15 +367,30 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private fun drawApps() {
         val w = apps; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
-        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1040f, 720f, 40f, 40f, p)
+        panelBg(c, 1040, 720, 44f)
+        p.style = Paint.Style.FILL; p.color = 0xFF151929.toInt(); c.drawRoundRect(40f, 28f, 560f, 88f, 30f, 30f, p)
+        tp.textAlign = Paint.Align.LEFT; tp.textSize = 28f; tp.color = 0xFF9AA3BD.toInt(); c.drawText("Buscar apps", 76f, 68f, tp)
+        p.color = 0xFF7C5CFF.toInt(); c.drawRoundRect(600f, 36f, 740f, 80f, 22f, 22f, p)
+        tp.textAlign = Paint.Align.CENTER; tp.textSize = 24f; tp.color = Color.WHITE; c.drawText("Todos", 670f, 67f, tp)
         appList.forEachIndexed { i, a ->
-            val x = 45f + (i % 3) * 330f; val y = 50f + (i / 3) * 220f
-            val r = RectF(x, y, x + 300f, y + 190f)
-            val ib = iconBmps[a.id]; p.color = if (ib != null) 0xFF232840.toInt() else a.color; c.drawRoundRect(r, 28f, 28f, p)
-            if (hoverKey == w.id + ":app:" + a.id) { p.color = 0x55FFFFFF; c.drawRoundRect(r, 28f, 28f, p) }
-            tp.textAlign = Paint.Align.CENTER; tp.color = Color.WHITE
-            if (ib != null) c.drawBitmap(ib, null, RectF(r.centerX() - 60f, r.top + 18f, r.centerX() + 60f, r.top + 138f), ip) else { tp.textSize = 64f; c.drawText(a.glyph, r.centerX(), r.centerY() + 10f, tp) }
-            tp.textSize = 30f; c.drawText(a.name, r.centerX(), r.bottom - 26f, tp)
+            val x = 45f + (i % 3) * 330f; val y = 116f + (i / 3) * 196f
+            val r = RectF(x, y, x + 300f, y + 176f)
+            val hot = hoverKey == w.id + ":app:" + a.id
+            val ib = iconBmps[a.id]
+            p.style = Paint.Style.FILL
+            p.shader = LinearGradient(r.left, r.top, r.left, r.bottom,
+                if (hot) 0xFF3A4270.toInt() else 0xFF2A3050.toInt(), if (hot) 0xFF272E55.toInt() else 0xFF1B2038.toInt(), Shader.TileMode.CLAMP)
+            c.drawRoundRect(r, 30f, 30f, p)
+            p.shader = null
+            if (hot) { p.style = Paint.Style.STROKE; p.strokeWidth = 4f; p.color = 0xFF9D86FF.toInt(); c.drawRoundRect(r, 30f, 30f, p); p.style = Paint.Style.FILL }
+            if (ib != null) {
+                c.drawBitmap(ib, null, RectF(r.centerX() - 46f, r.top + 22f, r.centerX() + 46f, r.top + 114f), ip)
+            } else {
+                p.color = a.color; c.drawCircle(r.centerX(), r.top + 68f, 46f, p)
+                tp.textAlign = Paint.Align.CENTER; tp.textSize = 34f; tp.color = Color.WHITE; c.drawText(a.glyph, r.centerX(), r.top + 80f, tp)
+            }
+            tp.textAlign = Paint.Align.CENTER; tp.textSize = 28f; tp.color = Color.WHITE
+            c.drawText(a.name, r.centerX(), r.bottom - 26f, tp)
             w.btns.add(Btn("app:" + a.id, r))
         }
         w.dirty = true
@@ -310,7 +398,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private fun drawKb() {
         val w = kb; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
-        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1280f, 520f, 40f, 40f, p)
+        panelBg(c, 1280, 520, 44f)
         listOf("1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm./").forEachIndexed { j, row ->
             row.forEachIndexed { i, ch -> key(c, w, "k:$ch", "$ch", RectF(40f + i * 120f, 20f + j * 96f, 152f + i * 120f, 104f + j * 96f)) }
         }
@@ -322,7 +410,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private fun drawCfg() {
         val w = cfg; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
-        p.style = Paint.Style.FILL; p.color = 0xE61A1F30.toInt(); c.drawRoundRect(0f, 0f, 1000f, 800f, 40f, 40f, p)
+        panelBg(c, 1000, 800, 44f)
         val rows = listOf(
             Triple("Lente k1", String.format(Locale.US, "%.2f", k1), "k1"),
             Triple("Lente k2", String.format(Locale.US, "%.2f", k2), "k2"),
@@ -429,10 +517,15 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private fun planeHit(w: Win, o: FloatArray, d: FloatArray): Hit? {
         val den = dot(d, w.n); if (abs(den) < 1e-4f) return null
-        val t = ((w.pos[0] - o[0]) * w.n[0] + (w.pos[1] - o[1]) * w.n[1] + (w.pos[2] - o[2]) * w.n[2]) / den
+        val base = (w.pos[0] - o[0]) * w.n[0] + (w.pos[1] - o[1]) * w.n[1] + (w.pos[2] - o[2]) * w.n[2]
+        var t = base / den
         if (t < .1f) return null
-        val rel = floatArrayOf(o[0] + d[0] * t - w.pos[0], o[1] + d[1] * t - w.pos[1], o[2] + d[2] * t - w.pos[2])
-        val lx = dot(rel, w.r); val ly = dot(rel, w.u)
+        var rel = floatArrayOf(o[0] + d[0] * t - w.pos[0], o[1] + d[1] * t - w.pos[1], o[2] + d[2] * t - w.pos[2])
+        var lx = dot(rel, w.r)
+        t = (base + lx * lx / (2f * CURVE_R)) / den              // corrige para a superficie curva
+        if (t < .1f) return null
+        rel = floatArrayOf(o[0] + d[0] * t - w.pos[0], o[1] + d[1] * t - w.pos[1], o[2] + d[2] * t - w.pos[2])
+        lx = dot(rel, w.r); val ly = dot(rel, w.u)
         val ws = w.w * w.scale; val hs = w.h * w.scale
         return Hit(w, false, ((lx / ws + .5f) * w.bw).coerceIn(0f, w.bw.toFloat()), ((.5f - ly / hs) * w.bh).coerceIn(0f, w.bh.toFloat()), t, lx, ly)
     }
@@ -655,29 +748,36 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             fun X(i: Int) = (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
             fun Y(i: Int) = (q.hand.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
             val palm = hypot(X(0) - X(9), Y(0) - Y(9)).coerceAtLeast(20f)
-            // mao: interior escuro em degrade (preto no punho -> cinza nas pontas) + linha fina clara nas bordas
-            val paths = ArrayList<Path>()
-            for (ch in chains) {
-                val pth = Path(); pth.moveTo(X(ch[0]), Y(ch[0]))
-                for (k in 1 until ch.size) pth.lineTo(X(ch[k]), Y(ch[k]))
-                paths.add(pth)
+            // mao: dedos que afinam para as pontas, brilho suave, linha fina clara nas bordas e interior em degrade
+            val w0 = palm * .26f
+            val ow = (palm * .025f).coerceIn(2f, 4f)
+            val segs = ArrayList<FloatArray>()
+            for ((ci, ch) in chains.withIndex()) {
+                for (k in 0 until ch.size - 1) {
+                    val t = k / (ch.size - 1f)
+                    val wd = if (k == 0) w0 * 1.1f else w0 * (1.0f - .38f * t) * (if (ci == 0) 1.08f else 1f)
+                    segs.add(floatArrayOf(X(ch[k]), Y(ch[k]), X(ch[k + 1]), Y(ch[k + 1]), wd))
+                }
             }
             val pm = Path(); pm.moveTo(X(0), Y(0))
             for (i in intArrayOf(1, 5, 9, 13, 17)) pm.lineTo(X(i), Y(i))
             pm.close()
-            val w0 = palm * .26f
-            val ow = (palm * .025f).coerceIn(2f, 4f)
             hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
             hp.shader = null
-            hp.color = if (q === hostP && menuBtns.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xCCE6E6E6.toInt()                                   // 1) linha fina clara nas bordas (estilo Quest)
-            hp.style = Paint.Style.STROKE; hp.strokeWidth = w0 + 2f * ow
-            for (pth in paths) c.drawPath(pth, hp)
+            val rimCol = if (q === hostP && menuBtns.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xCCE6E6E6.toInt()
+            hp.style = Paint.Style.STROKE
+            hp.color = 0x22AEB8FF                                           // 0) brilho suave (duas camadas, sem desfoque)
+            for (sg in segs) { hp.strokeWidth = sg[4] + 2f * ow + 18f; c.drawLine(sg[0], sg[1], sg[2], sg[3], hp) }
+            hp.color = 0x33AEB8FF
+            for (sg in segs) { hp.strokeWidth = sg[4] + 2f * ow + 8f; c.drawLine(sg[0], sg[1], sg[2], sg[3], hp) }
+            hp.color = rimCol                                               // 1) linha fina clara nas bordas
+            for (sg in segs) { hp.strokeWidth = sg[4] + 2f * ow; c.drawLine(sg[0], sg[1], sg[2], sg[3], hp) }
             hp.style = Paint.Style.FILL_AND_STROKE; hp.strokeWidth = 2f * ow
             c.drawPath(pm, hp)
-            hp.shader = LinearGradient(X(0), Y(0), X(12) + .5f, Y(12) + .5f,  // 2) interior em degrade
+            hp.shader = LinearGradient(X(0), Y(0), X(12) + .5f, Y(12) + .5f,   // 2) interior em degrade
                 0xFF000000.toInt(), 0xFF7A7A7A.toInt(), Shader.TileMode.CLAMP)
-            hp.style = Paint.Style.STROKE; hp.strokeWidth = w0
-            for (pth in paths) c.drawPath(pth, hp)
+            hp.style = Paint.Style.STROKE
+            for (sg in segs) { hp.strokeWidth = sg[4]; c.drawLine(sg[0], sg[1], sg[2], sg[3], hp) }
             hp.style = Paint.Style.FILL; c.drawPath(pm, hp)
             hp.shader = null
             if (q === pointerP && !(menuBtns.isNotEmpty() && pointerP === hostP)) {
@@ -741,7 +841,11 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     }
 
     // ---------- OpenGL ----------
-    private var progQ = 0; private var progD = 0
+    private var progQ = 0; private var progD = 0; private var progW = 0
+    private var wPos = 0; private var wMvp = 0; private var wUv = 0; private var wBend = 0; private var wQuad = 0
+    private var wBox = 0; private var wRad = 0; private var wGlow = 0; private var wAlpha = 0; private var wShadow = 0; private var wTex = 0
+    private val STRIPN = 24
+    private lateinit var strip: FloatBuffer
     private lateinit var quad: FloatBuffer
     private var qPos = 0; private var qMvp = 0; private var qUv = 0; private var qA = 0; private var qTex = 0
     private var dPos = 0; private var dK1 = 0; private var dK2 = 0; private var dZ = 0; private var dTex = 0
@@ -765,12 +869,23 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         progQ = GlUtil.program(VS_Q, FS_Q); progD = GlUtil.program(VS_D, FS_D)
+        progW = GlUtil.program(VS_W, FS_W)
+        wPos = GLES20.glGetAttribLocation(progW, "aPos"); wMvp = GLES20.glGetUniformLocation(progW, "uMVP")
+        wUv = GLES20.glGetUniformLocation(progW, "uUV"); wBend = GLES20.glGetUniformLocation(progW, "uBend")
+        wQuad = GLES20.glGetUniformLocation(progW, "uQuad"); wBox = GLES20.glGetUniformLocation(progW, "uBox")
+        wRad = GLES20.glGetUniformLocation(progW, "uRad"); wGlow = GLES20.glGetUniformLocation(progW, "uGlow")
+        wAlpha = GLES20.glGetUniformLocation(progW, "uA"); wShadow = GLES20.glGetUniformLocation(progW, "uShadow")
+        wTex = GLES20.glGetUniformLocation(progW, "uTex")
         qPos = GLES20.glGetAttribLocation(progQ, "aPos"); qMvp = GLES20.glGetUniformLocation(progQ, "uMVP")
         qUv = GLES20.glGetUniformLocation(progQ, "uUV"); qA = GLES20.glGetUniformLocation(progQ, "uA"); qTex = GLES20.glGetUniformLocation(progQ, "uTex")
         dPos = GLES20.glGetAttribLocation(progD, "aPos"); dK1 = GLES20.glGetUniformLocation(progD, "uK1")
         dK2 = GLES20.glGetUniformLocation(progD, "uK2"); dZ = GLES20.glGetUniformLocation(progD, "uZ"); dTex = GLES20.glGetUniformLocation(progD, "uTex")
         quad = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer()
         quad.put(floatArrayOf(-.5f, -.5f, .5f, -.5f, -.5f, .5f, .5f, .5f)); quad.position(0)
+        val sv = FloatArray((STRIPN + 1) * 4)                                   // faixa com varias colunas para curvar a janela
+        for (i in 0..STRIPN) { val x = -.5f + i.toFloat() / STRIPN; sv[i * 4] = x; sv[i * 4 + 1] = -.5f; sv[i * 4 + 2] = x; sv[i * 4 + 3] = .5f }
+        strip = ByteBuffer.allocateDirect(sv.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+        strip.put(sv); strip.position(0)
         for (w in wins) { w.tex = 0; w.tTex = 0; w.dirty = true; w.tDirty = true }
         camTex = 0; lastCam = null; ovTex = 0; curTex = 0; curKey = -1; lastVer = -1; fbo = 0
         texDims.clear(); arInit = false; lastOvKey = ""
@@ -835,14 +950,42 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         m[3] = 0f; m[7] = 0f; m[11] = 0f; m[15] = 1f
     }
 
-    private fun drawWin(w: Win, vp: FloatArray) {
-        val ws = w.w * w.scale; val hs = w.h * w.scale
+    private fun drawWinQuad(vp: FloatArray, w: Win, tex: Int, bx: Float, by: Float, cy: Float, rad: Float,
+                            uvScale: Float, alpha: Float, glow: Float, shadow: Boolean) {
+        val pad = if (shadow) .09f else 0f
+        val qx = bx + 2f * pad; val qy = by + 2f * pad
         val m = FloatArray(16); val mvp = FloatArray(16)
-        fillModel(m, w, ws, hs, 0f); GLM.multiplyMM(mvp, 0, vp, 0, m, 0)
-        if (w.tex != 0) drawQuad(mvp, w.tex, 0f, 0f, w.uScale, 1f, 1f)
+        fillModel(m, w, qx, qy, cy)
+        GLM.multiplyMM(mvp, 0, vp, 0, m, 0)
+        GLES20.glUseProgram(progW)
+        GLES20.glEnableVertexAttribArray(wPos)
+        GLES20.glVertexAttribPointer(wPos, 2, GLES20.GL_FLOAT, false, 0, strip)
+        GLES20.glUniformMatrix4fv(wMvp, 1, false, mvp, 0)
+        GLES20.glUniform4f(wUv, 0f, 0f, uvScale, 1f)
+        GLES20.glUniform1f(wBend, qx * qx / (2f * CURVE_R))
+        GLES20.glUniform2f(wQuad, qx, qy)
+        GLES20.glUniform2f(wBox, bx, by)
+        GLES20.glUniform1f(wRad, rad)
+        GLES20.glUniform1f(wGlow, glow)
+        GLES20.glUniform1f(wAlpha, alpha)
+        GLES20.glUniform1f(wShadow, if (shadow) 1f else 0f)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+        GLES20.glUniform1i(wTex, 0)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, (STRIPN + 1) * 2)
+    }
+
+    private fun drawWin(w: Win, vp: FloatArray) {
+        val k = .9f + .1f * w.anim.coerceIn(0f, 1f)             // abre crescendo
+        val a = w.anim.coerceIn(0f, 1f)
+        val ws = w.w * w.scale * k; val hs = w.h * w.scale * k
+        if (w.tex != 0) {
+            drawWinQuad(vp, w, w.tex, ws, hs, 0f, w.rad * k, w.uScale, a, w.glow, true)      // sombra
+            drawWinQuad(vp, w, w.tex, ws, hs, 0f, w.rad * k, w.uScale, a, w.glow, false)
+        }
         if (w.hasTitle && w.tTex != 0) {
-            fillModel(m, w, ws, w.thM, -(hs / 2f + w.thM / 2f)); GLM.multiplyMM(mvp, 0, vp, 0, m, 0)
-            drawQuad(mvp, w.tTex, 0f, 0f, 1f, 1f, 1f)
+            val th = w.thM * k
+            drawWinQuad(vp, w, w.tTex, ws, th, -(hs / 2f + th / 2f), th / 2f, 1f, a, w.glow * .6f, false)
         }
     }
 
@@ -954,6 +1097,12 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             if (w.hasTitle && w.tDirty) { drawTitle(w); w.tBmp?.let { w.tTex = up(w.tTex, it) } }
             if (w.dirty) { w.bmp?.let { w.tex = up(w.tex, it) }; w.dirty = false }
         }
+        val hovWin = hoverKey.substringBefore(':')                // animacao de abrir/fechar e brilho ao apontar
+        for (w in wins) {
+            w.anim += ((if (w.visible) 1f else 0f) - w.anim) * minOf(1f, dt * 10f)
+            val gt = if (w.id == hovWin || (gw === w && mode != 0)) 1f else 0f
+            w.glow += (gt - w.glow) * minOf(1f, dt * 12f)
+        }
         render()
     }
 
@@ -972,7 +1121,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             val ex = head[0] + R[0] * s; val ey = head[1] + R[1] * s; val ez = head[2] + R[2] * s
             GLM.setLookAtM(view, 0, ex, ey, ez, ex + F[0], ey + F[1], ez + F[2], U[0], U[1], U[2])
             GLM.multiplyMM(vp, 0, proj, 0, view, 0)
-            val vis = wins.filter { it.visible }.sortedByDescending {
+            val vis = wins.filter { it.anim > .03f }.sortedByDescending {
                 val dx = it.pos[0] - ex; val dy = it.pos[1] - ey; val dz = it.pos[2] - ez; dx * dx + dy * dy + dz * dz
             }
             for (w in vis) drawWin(w, vp)
