@@ -5,6 +5,7 @@ import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Size
 import android.view.WindowManager
 import android.widget.Toast
@@ -24,6 +25,7 @@ class MainActivity : AppCompatActivity() {
     private var tracker: HandTracker? = null
     private var ar: ArTracker? = null
     private var fcount = 0
+    private val vo = VoLite()
     private val exec = Executors.newSingleThreadExecutor()
     private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) startCamera() }
 
@@ -38,6 +40,7 @@ class MainActivity : AppCompatActivity() {
         }
         browser = BrowserSurface(this, 1024, 576)
         vr = VrGlView(this, browser) { finish() }
+        vr.vo = vo
         setContentView(vr)
         browser.start("https://www.youtube.com/")
         perm.launch(Manifest.permission.CAMERA)
@@ -48,7 +51,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Modelo de mãos ausente: usando só o olhar", Toast.LENGTH_LONG).show(); null
         }
         if (ArTracker.supported(this)) {
-            val a = ArTracker(this, tracker) { b, h -> vr.cam = b; vr.hands = h }
+            val a = ArTracker(this, tracker) { b, h -> vr.cam = b; vr.hands = h; vo.feed(b, SystemClock.uptimeMillis()) }
             if (a.create()) { ar = a; vr.ar = a; a.resume(); return }
             Toast.makeText(this, "ARCore falhou: sem tracking de posicao", Toast.LENGTH_LONG).show()
         } else {
@@ -70,6 +73,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 px.close()
                 vr.cam = b
+                vo.feed(b, SystemClock.uptimeMillis())
                 fcount++
                 if (fcount % 2 == 0) vr.hands = try { tracker?.detect(b) ?: emptyList() } catch (e: Exception) { emptyList() }
             }
