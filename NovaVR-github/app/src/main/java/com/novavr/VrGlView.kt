@@ -141,7 +141,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private val addr = Win("addr", 2.2f, .14f, 1760, 112, false).also { it.sd = 2.2f; it.sy = .93f; it.rad = .07f }
     private val apps = Win("apps", 1.3f, .9f, 1040, 720).also { it.title = "Biblioteca"; it.sd = 2.0f; it.sy = .1f; it.sa = -38f; it.rad = .07f }
     private val kb = Win("kb", 1.6f, .65f, 1280, 520).also { it.title = "Teclado"; it.sd = 1.6f; it.sy = -1.1f; it.rad = .06f }
-    private val cfg = Win("cfg", 1f, .8f, 1000, 800).also { it.title = "Configuracoes"; it.sd = 2.0f; it.sy = .1f; it.sa = 38f; it.rad = .06f }
+    private val cfg = Win("cfg", 1f, .9f, 1000, 900).also { it.title = "Configuracoes"; it.sd = 2.0f; it.sy = .1f; it.sa = 38f; it.rad = .06f }
     private val wins = listOf(browserWin, addr, dock, apps, kb, cfg)
 
     private class App(val id: String, val name: String, val url: String, val color: Int, val glyph: String)
@@ -184,6 +184,9 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private var alphaAr = 0f; private var alphaInit = false
     private var arInit = false; private var arGeoDirty = true; private var lastArStatus = ""
     @Volatile var ar: ArTracker? = null
+    @Volatile var vo: VoLite? = null                           // andar pela camera (experimental)
+    private val voRel = FloatArray(3); private val voPend = FloatArray(3)
+    private var prevF = floatArrayOf(0f, 0f, -1f)
     private fun wrapA(x: Float): Float {
         var v = x; val t2 = 2f * PI.toFloat()
         while (v > PI.toFloat()) v -= t2
@@ -410,7 +413,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private fun drawCfg() {
         val w = cfg; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
-        panelBg(c, 1000, 800, 44f)
+        panelBg(c, 1000, 900, 44f)
         val rows = listOf(
             Triple("Lente k1", String.format(Locale.US, "%.2f", k1), "k1"),
             Triple("Lente k2", String.format(Locale.US, "%.2f", k2), "k2"),
@@ -429,9 +432,16 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         key(c, w, "mode", if (touchMode) "Modo: Toque" else "Modo: Laser", RectF(360f, 540f, 660f, 624f), 28f)
         key(c, w, "exit", "Sair", RectF(680f, 540f, 960f, 624f), 30f)
         key(c, w, "hand", if (dominantRight) "Mao dominante: Direita" else "Mao dominante: Esquerda", RectF(40f, 640f, 660f, 705f), 28f)
+        val vv = vo
+        key(c, w, "vo", if (vv == null) "Andar pela camera: indisponivel" else if (vv.enabled) "Andar pela camera: Ligado" else "Andar pela camera: Desligado",
+            RectF(40f, 720f, 600f, 790f), 26f)
+        tp.textAlign = Paint.Align.CENTER; tp.textSize = 26f; tp.color = Color.WHITE
+        c.drawText("Prof. " + String.format(Locale.US, "%.1f", vv?.depth ?: 0f) + " m", 705f, 765f, tp)
+        key(c, w, "z-", "-", RectF(790f, 720f, 870f, 790f), 32f)
+        key(c, w, "z+", "+", RectF(890f, 720f, 970f, 790f), 32f)
         tp.textAlign = Paint.Align.LEFT; tp.textSize = 26f; tp.color = 0xFF9AA3BD.toInt()
-        c.drawText("As janelas ficam fixas no mundo virtual.", 40f, 735f, tp)
-        c.drawText("Posicao: " + (ar?.status ?: "sem ARCore (use Andar)"), 40f, 775f, tp)
+        c.drawText("As janelas ficam fixas no mundo virtual.", 40f, 835f, tp)
+        c.drawText("Posicao: " + (ar?.status ?: "sem ARCore (use Andar)"), 40f, 875f, tp)
         w.dirty = true
     }
 
@@ -457,6 +467,9 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             id == "rc" -> { needCenter = true; havePos0 = false }
             id == "mode" -> touchMode = !touchMode
             id == "hand" -> dominantRight = !dominantRight
+            id == "vo" -> vo?.let { it.enabled = !it.enabled }
+            id == "z-" -> vo?.let { it.depth = (it.depth - .5f).coerceAtLeast(1f) }
+            id == "z+" -> vo?.let { it.depth = (it.depth + .5f).coerceAtMost(6f) }
             id == "exit" -> post { onExit() }
             id == "k1-" -> k1 = (k1 - .03f).coerceAtLeast(0f)
             id == "k1+" -> k1 = (k1 + .03f).coerceAtMost(.6f)
@@ -1052,7 +1065,20 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
                 arRel[0] += (tx - arRel[0]) * .4f; arRel[1] += (ry - arRel[1]) * .4f; arRel[2] += (tz - arRel[2]) * .4f
             }
         }
-        for (i in 0..2) head[i] = walkOff[i] + arRel[i]
+        val v = vo
+        if (v != null) {
+            val ang = acos(dot(F, prevF).coerceIn(-1f, 1f))             // velocidade de giro da cabeca (rad/s)
+            if (dt > 0f) v.setRate(ang / dt)
+            prevF = floatArrayOf(F[0], F[1], F[2])
+            val dMove = v.take()
+            if (v.enabled && ar?.tracking != true && dMove != 0f) {     // com ARCore rastreando, nao usa a camera
+                val fh = norm(floatArrayOf(F[0], 0f, F[2]))
+                voPend[0] += fh[0] * dMove; voPend[2] += fh[2] * dMove
+            }
+            val kk = minOf(1f, dt * 6f)
+            for (i in 0..2) { val st = voPend[i] * kk; voRel[i] += st; voPend[i] -= st }
+        }
+        for (i in 0..2) head[i] = walkOff[i] + arRel[i] + voRel[i]
 
         if (now - lastPoll > 30_000_000L) {                  // navegador: no maximo ~30 quadros/s
             lastPoll = now
