@@ -134,7 +134,28 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private val walkOff = FloatArray(3)          // andar virtual (botoes)
     private var F = floatArrayOf(0f, 0f, -1f); private var R = floatArrayOf(1f, 0f, 0f); private var U = floatArrayOf(0f, 1f, 0f)
     private var hoverKey = ""
-    private var uiDirty = true
+    private val dirtyIds = HashSet<String>()                    // janelas cujo bitmap precisa ser redesenhado
+    private fun ui(vararg ids: String) { for (i in ids) dirtyIds.add(i) }
+    private val levels = floatArrayOf(.45f, .55f, .65f, .75f, .85f)   // escala de renderizacao (adaptativa)
+    private var level = 2
+    private var rebuild = false
+    private var frames = 0; private var acc = 0f; private var cool = 3f
+    private var lastPoll = 0L; private var lastClock = 0L
+    private var lastOvKey = ""
+    private val texDims = HashMap<Int, Long>()
+    private val arRel = FloatArray(3)                            // andar real (ARCore)
+    private var pos0 = FloatArray(3); private var havePos0 = false
+    private var alphaAr = 0f; private var alphaInit = false
+    private var arInit = false; private var arGeoDirty = true; private var lastArStatus = ""
+    @Volatile var ar: ArTracker? = null
+    private fun wrapA(x: Float): Float {
+        var v = x; val t2 = 2f * PI.toFloat()
+        while (v > PI.toFloat()) v -= t2
+        while (v < -PI.toFloat()) v += t2
+        return v
+    }
+    @Suppress("DEPRECATION")
+    private fun displayRotation(): Int = act.windowManager.defaultDisplay.rotation
     @Volatile private var tap = false
 
     // ---------- sensores ----------
@@ -321,7 +342,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         key(c, w, "exit", "Sair", RectF(680f, 540f, 960f, 624f), 30f)
         tp.textAlign = Paint.Align.LEFT; tp.textSize = 26f; tp.color = 0xFF9AA3BD.toInt()
         c.drawText("As janelas ficam fixas no mundo virtual.", 40f, 700f, tp)
-        c.drawText("Sem tracking de posicao real, use Andar.", 40f, 740f, tp)
+        c.drawText("Posicao: " + (ar?.status ?: "sem ARCore (use Andar)"), 40f, 740f, tp)
         w.dirty = true
     }
 
@@ -344,7 +365,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             id.startsWith("app:") -> appList.firstOrNull { it.id == id.substring(4) }?.let { load(it.url) }
             id == "kb" -> toggle(kb)
             id == "cfg" -> toggle(cfg)
-            id == "rc" -> needCenter = true
+            id == "rc" -> { needCenter = true; havePos0 = false }
             id == "mode" -> touchMode = !touchMode
             id == "exit" -> post { onExit() }
             id == "k1-" -> k1 = (k1 - .03f).coerceAtLeast(0f)
@@ -362,7 +383,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             id == "k:go" -> go()
             id.startsWith("k:") -> text += id.substring(2)
         }
-        uiDirty = true
+        ui("dock", "addr", "cfg")
     }
 
     private fun sendTouch(action: Int, x: Float, y: Float) { post { browser.touch(action, x, y) } }
@@ -467,7 +488,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         curHit = h
         val id = if (mode == 0 && h != null) btnAt(h) else null
         val key = if (mode == 0 && h != null) h.win.id + ":" + (id ?: "") else ""
-        if (key != hoverKey) { hoverKey = key; uiDirty = true }
+        if (key != hoverKey) { ui(hoverKey.substringBefore(':'), key.substringBefore(':')); hoverKey = key }
 
         if (tap) { tap = false; if (h != null && mode == 0) activate(h, true) }
 
@@ -494,7 +515,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             if (w != null && h != null) when (mode) {
                 1 -> { lastBx = h.bx; lastBy = h.by; sendTouch(MotionEvent.ACTION_MOVE, h.bx, h.by) }
                 2 -> place(w, floatArrayOf(o[0] + d[0] * gDist + gOff[0], o[1] + d[1] * gDist + gOff[1], o[2] + d[2] * gDist + gOff[2]))
-                3 -> { w.scale = (gScale * (1f + (h.lx - gLx) / (w.w * gScale))).coerceIn(.4f, 3f); uiDirty = true }
+                3 -> { w.scale = (gScale * (1f + (h.lx - gLx) / (w.w * gScale))).coerceIn(.4f, 3f) }
             }
         } else if (pinching) {
             pinching = false
@@ -523,132 +544,37 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private fun drawOverlay() {
         val b = ovBmp ?: return
-        b.eraseColor(Color.TRANSPARENT)
-
+        b.eraseColor(0)
         val c = Canvas(b)
-        val ew = fw / 2f
-        val eh = fh.toFloat()
-
-        // O bitmap do overlay tem exatamente a dimensao de UM olho.
-        // Assim, as coordenadas calculadas pelo tracking nao sofrem deslocamento.
-        c.translate(b.width / 2f, b.height / 2f)
-        c.scale(b.width / ew, b.height / eh)
-
-        val cb = cam
-        if (cb == null) {
-            hp.shader = null
-            hp.style = Paint.Style.FILL
-            return
-        }
-
-        // Diagnostico discreto, mantido do sistema original.
-        tp.textAlign = Paint.Align.CENTER
-        tp.textSize = 26f
-        tp.color = Color.WHITE
-        c.drawText(
-            "camera: ok   maos: ${hands.size}" +
-                (if (touchMode) "   toque" else "   laser") +
-                (if (pinching) "   CLIQUE" else ""),
-            0f,
-            -eh / 2f + 60f,
-            tp
-        )
-
+        val ew = fw / 2f; val eh = fh.toFloat()
+        c.translate(b.width / 2f, b.height / 2f); c.scale(b.width / ew, b.height / eh)
+        tp.textAlign = Paint.Align.CENTER; tp.textSize = 26f; tp.color = Color.WHITE
+        c.drawText("camera: " + (if (cam != null) "ok" else "nao") + "   maos: " + hands.size + (if (touchMode) "   toque" else "   laser") + (if (pinching) "   CLIQUE" else "") + "   Q" + (level + 1), 0f, -eh / 2f + 60f, tp)
+        val cb = cam ?: return
         for (q in ptrs) {
-            // Converte os landmarks da camera para coordenadas do olho.
-            fun X(i: Int): Float =
-                (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
-
-            fun Y(i: Int): Float =
-                (q.hand.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
-
+            fun X(i: Int) = (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
+            fun Y(i: Int) = (q.hand.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
             val palm = hypot(X(0) - X(9), Y(0) - Y(9)).coerceAtLeast(20f)
-            val outlineWidth = (palm * 0.22f).coerceIn(5f, 30f)
-            val fillWidth = (palm * 0.135f).coerceIn(3f, 20f)
-            val gray = 0xFFD0D0D0.toInt()
-
             hp.shader = null
-            hp.alpha = 255
-            hp.strokeCap = Paint.Cap.ROUND
-            hp.strokeJoin = Paint.Join.ROUND
-
-            // Laser fica atras da mao, para nao atravessar visualmente os dedos.
-            hp.style = Paint.Style.STROKE
-            hp.shader = LinearGradient(
-                q.ox, q.oy, q.tx + 0.5f, q.ty + 0.5f,
-                if (q.pinch) 0xFF22C55E.toInt() else 0xCCFFFFFF.toInt(),
-                0x00FFFFFF,
-                Shader.TileMode.CLAMP
-            )
-            hp.strokeWidth = max(4f, palm * 0.045f)
-            c.drawLine(q.ox, q.oy, q.tx, q.ty, hp)
-            hp.shader = null
-
-            // Contorno externo da palma.
-            val palmPath = Path().apply {
-                moveTo(X(0), Y(0))
-                for (i in intArrayOf(1, 5, 9, 13, 17)) {
-                    lineTo(X(i), Y(i))
-                }
-                close()
-            }
-
-            hp.style = Paint.Style.FILL
-            hp.color = gray
-            c.drawPath(palmPath, hp)
-
-            hp.style = Paint.Style.STROKE
-            hp.color = Color.BLACK
-            hp.strokeWidth = outlineWidth
-            c.drawPath(palmPath, hp)
-
-            // Primeiro desenha o contorno preto de cada dedo.
-            hp.style = Paint.Style.STROKE
-            hp.color = Color.BLACK
-            hp.strokeWidth = outlineWidth
-            for (chain in chains) {
-                val path = Path().apply {
-                    moveTo(X(chain[0]), Y(chain[0]))
-                    for (k in 1 until chain.size) {
-                        lineTo(X(chain[k]), Y(chain[k]))
-                    }
-                }
+            hp.style = Paint.Style.STROKE; hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
+            hp.color = 0xCC3F5F7F.toInt(); hp.strokeWidth = palm * .26f
+            for (ch in chains) {
+                val path = Path(); path.moveTo(X(ch[0]), Y(ch[0]))
+                for (k in 1 until ch.size) path.lineTo(X(ch[k]), Y(ch[k]))
                 c.drawPath(path, hp)
             }
-
-            // Depois desenha o preenchimento cinza por cima do contorno.
-            hp.color = gray
-            hp.strokeWidth = fillWidth
-            for (chain in chains) {
-                val path = Path().apply {
-                    moveTo(X(chain[0]), Y(chain[0]))
-                    for (k in 1 until chain.size) {
-                        lineTo(X(chain[k]), Y(chain[k]))
-                    }
-                }
-                c.drawPath(path, hp)
-            }
-
-            // Articulacoes com contorno preto e centro cinza.
-            hp.style = Paint.Style.FILL
-            for (i in 0..20) {
-                val radius = (palm * 0.052f).coerceIn(3f, 12f)
-                hp.color = Color.BLACK
-                c.drawCircle(X(i), Y(i), radius, hp)
-                hp.color = gray
-                c.drawCircle(X(i), Y(i), radius * 0.66f, hp)
-            }
-
-            // Ponta do indicador: destaque visual alinhado ao landmark 8.
-            val tipRadius = (palm * 0.09f).coerceIn(5f, 18f)
-            hp.color = Color.BLACK
-            c.drawCircle(X(8), Y(8), tipRadius, hp)
-            hp.color = if (q.pinch) 0xFF22C55E.toInt() else gray
-            c.drawCircle(X(8), Y(8), tipRadius * 0.68f, hp)
+            val pm = Path(); pm.moveTo(X(0), Y(0))
+            for (i in intArrayOf(1, 5, 9, 13, 17)) pm.lineTo(X(i), Y(i))
+            pm.close(); hp.style = Paint.Style.FILL; c.drawPath(pm, hp)
+            val col = if (q.pinch) 0xFF22C55E.toInt() else 0xFFFFFFFF.toInt()
+            hp.style = Paint.Style.STROKE
+            hp.shader = LinearGradient(q.ox, q.oy, q.tx + .5f, q.ty + .5f, col, col and 0x00FFFFFF, Shader.TileMode.CLAMP)
+            hp.strokeWidth = 18f; hp.alpha = 70; c.drawLine(q.ox, q.oy, q.tx, q.ty, hp)
+            hp.strokeWidth = 6f; hp.alpha = 255; c.drawLine(q.ox, q.oy, q.tx, q.ty, hp)
+            hp.shader = null
+            hp.style = Paint.Style.FILL; hp.color = if (q.pinch) 0xFF22C55E.toInt() else 0xDDFFFFFF.toInt()
+            c.drawCircle(q.ox, q.oy, if (q.pinch) 9f else 12f, hp)
         }
-
-        hp.shader = null
-        hp.alpha = 255
         hp.style = Paint.Style.FILL
     }
 
@@ -685,27 +611,47 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         quad.put(floatArrayOf(-.5f, -.5f, .5f, -.5f, -.5f, .5f, .5f, .5f)); quad.position(0)
         for (w in wins) { w.tex = 0; w.tTex = 0; w.dirty = true; w.tDirty = true }
         camTex = 0; lastCam = null; ovTex = 0; curTex = 0; curKey = -1; lastVer = -1; fbo = 0
+        texDims.clear(); arInit = false; lastOvKey = ""
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        uiDirty = true
+        ui("dock", "addr", "apps", "kb", "cfg", "web")
     }
 
     override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
         sw = w; sh = h
-        fw = ((w * .85f).toInt() / 2) * 2; fh = (h * .85f).toInt()
+        buildFbo()
+        arGeoDirty = true
+    }
+
+    private fun buildFbo() {
+        if (fbo != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(fboTex), 0)
+        }
+        val sc = levels[level]
+        fw = ((sw * sc).toInt() / 2) * 2; fh = (sh * sc).toInt()
         fboTex = GlUtil.tex()
         GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, fw, fh, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
         val f = IntArray(1); GLES20.glGenFramebuffers(1, f, 0); fbo = f[0]
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
         GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, fboTex, 0)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        ovBmp = Bitmap.createBitmap(max(fw / 2, 64), max(fh, 64), Bitmap.Config.ARGB_8888)
+        ovBmp = Bitmap.createBitmap(max(fw / 4, 64), max(fh / 2, 64), Bitmap.Config.ARGB_8888)
+        lastOvKey = ""
+        rebuild = false
     }
 
+    /** Envia o bitmap para a textura; depois da primeira vez usa atualizacao parcial (bem mais rapida). */
     private fun up(tex: Int, b: Bitmap): Int {
         val t = if (tex == 0) GlUtil.tex() else tex.also { GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, it) }
-        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, b, 0)
+        val dims = (b.width.toLong() shl 32) or b.height.toLong()
+        if (texDims[t] == dims) {
+            GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, b)
+        } else {
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, b, 0)
+            texDims[t] = dims
+        }
         return t
     }
 
@@ -770,14 +716,46 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     override fun onDrawFrame(gl: GL10?) {
         val now = System.nanoTime(); val dt = ((now - lastT) / 1e9f).coerceAtMost(.1f); lastT = now
+        if (rebuild) buildFbo()
+        // qualidade adaptativa: sobe ou desce a resolucao conforme o tempo de quadro
+        acc += dt; frames++; cool -= dt
+        if (frames >= 45) {
+            val avg = acc / frames; frames = 0; acc = 0f
+            if (cool <= 0f) {
+                if (avg > .028f && level > 0) { level--; rebuild = true; cool = 3f }
+                else if (avg < .0175f && level < levels.size - 1) { level++; rebuild = true; cool = 8f }
+            }
+        }
+        if (now - lastClock > 30_000_000_000L) { lastClock = now; ui("dock") }
         updateHead()
 
-        for (i in 0..2) head[i] = walkOff[i]
+        val a = ar
+        if (a != null) {
+            if (!arInit) { a.initGl(); arInit = true; arGeoDirty = true }
+            if (arGeoDirty) { a.setDisplay(displayRotation(), sw, sh); arGeoDirty = false }
+            a.update()
+            if (a.status != lastArStatus) { lastArStatus = a.status; ui("cfg") }
+            if (a.tracking) {
+                if (abs(F[1]) < .7f) {                        // alinha o norte do ARCore com o do giroscopio
+                    val d = atan2(a.fwd[0], -a.fwd[2]) - atan2(F[0], -F[2])
+                    if (!alphaInit) { alphaAr = d; alphaInit = true } else alphaAr += wrapA(d - alphaAr) * .05f
+                }
+                if (!havePos0) { pos0 = a.pos.copyOf(); havePos0 = true }
+                val rx = a.pos[0] - pos0[0]; val ry = a.pos[1] - pos0[1]; val rz = a.pos[2] - pos0[2]
+                val ca = cos(alphaAr); val sa = sin(alphaAr)
+                val tx = rx * ca + rz * sa; val tz = -rx * sa + rz * ca
+                arRel[0] += (tx - arRel[0]) * .4f; arRel[1] += (ry - arRel[1]) * .4f; arRel[2] += (tz - arRel[2]) * .4f
+            }
+        }
+        for (i in 0..2) head[i] = walkOff[i] + arRel[i]
 
-        val bf = browser.poll()
-        if (bf != null && browser.version != lastVer) {
-            lastVer = browser.version; browserWin.bmp = bf
-            browserWin.uScale = browser.w.toFloat() / bf.width; browserWin.dirty = true
+        if (now - lastPoll > 30_000_000L) {                  // navegador: no maximo ~30 quadros/s
+            lastPoll = now
+            val bf = browser.poll()
+            if (bf != null && browser.version != lastVer) {
+                lastVer = browser.version; browserWin.bmp = bf
+                browserWin.uScale = browser.w.toFloat() / bf.width; browserWin.dirty = true
+            }
         }
         val cb = cam
         val ew = fw / 2f; val eh = fh.toFloat()
@@ -790,9 +768,25 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         }
 
         interact(dt)
-        if (uiDirty) { uiDirty = false; drawDock(); drawAddr(); drawApps(); drawKb(); drawCfg(); for (w in wins) w.tDirty = true }
-        drawOverlay()
-        ovBmp?.let { ovTex = up(ovTex, it) }
+        if (dirtyIds.isNotEmpty()) {                          // redesenha so as janelas que mudaram
+            for (id in dirtyIds) {
+                when (id) {
+                    "dock" -> drawDock()
+                    "addr" -> drawAddr()
+                    "apps" -> drawApps()
+                    "kb" -> drawKb()
+                    "cfg" -> drawCfg()
+                }
+            }
+            for (w in wins) if (dirtyIds.contains(w.id)) w.tDirty = true
+            dirtyIds.clear()
+        }
+        val ovKey = "" + (cam != null) + hands.size + touchMode + pinching + level
+        if (ptrs.isNotEmpty() || ovKey != lastOvKey) {        // overlay so quando ha mao ou o texto mudou
+            lastOvKey = ovKey
+            drawOverlay()
+            ovBmp?.let { ovTex = up(ovTex, it) }
+        }
         for (w in wins) {
             if (!w.visible) continue
             if (w.hasTitle && w.tDirty) { drawTitle(w); w.tBmp?.let { w.tTex = up(w.tTex, it) } }
@@ -819,21 +813,9 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             val vis = wins.filter { it.visible }.sortedByDescending {
                 val dx = it.pos[0] - ex; val dy = it.pos[1] - ey; val dz = it.pos[2] - ez; dx * dx + dy * dy + dz * dz
             }
-            // Camadas 3D primeiro: as janelas e o cursor ficam atras da mao.
-            GLES20.glEnable(GLES20.GL_BLEND)
-            GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-            GLES20.glDisable(GLES20.GL_DEPTH_TEST)
             for (w in vis) drawWin(w, vp)
             drawCursor(vp)
-
-            // A mao vem por ultimo em coordenadas do olho (overlay transparente).
-            // Isso garante que ela seja composta sobre a superficie das janelas.
-            if (ovTex != 0) {
-                GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-                GLES20.glEnable(GLES20.GL_BLEND)
-                GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-                drawQuad(FULL, ovTex, 0f, 0f, 1f, 1f, 1f)
-            }
+            if (ovTex != 0) drawQuad(FULL, ovTex, 0f, 0f, 1f, 1f, 1f)
         }
         // passada final: correcao de distorcao das lentes
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
