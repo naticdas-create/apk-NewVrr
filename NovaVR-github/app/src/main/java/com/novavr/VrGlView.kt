@@ -390,9 +390,15 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     // ---------- interacao: raio (mao ou olhar) contra janelas ----------
     private class Hit(val win: Win, val title: Boolean, val bx: Float, val by: Float, val t: Float, val lx: Float, val ly: Float)
-    private class Ptr(val hand: Hand, val ox: Float, val oy: Float, val tx: Float, val ty: Float, val pinch: Boolean)
+    private class Ptr(val hand: Hand, val ox: Float, val oy: Float, val tx: Float, val ty: Float, val pinch: Boolean, val k: Int)
 
     private val ptrs = ArrayList<Ptr>()
+    private class MBtn(val id: String, val cx: Float, val cy: Float, val r: Float)
+    private val menuBtns = ArrayList<MBtn>()                        // botoes redondos nas pontas dos dedos
+    private val menuIds = arrayOf("lib", "kb", "rc", "cfg")        // indicador, medio, anelar, minimo
+    private var hostP: Ptr? = null; private var pointerP: Ptr? = null
+    private var menuHover = ""; private var menuPressing = false; private var prevMenuPress = false
+    private var mDwell = 0f; private var mDwellId = ""
     private val sx = FloatArray(2); private val sy = FloatArray(2); private val sOn = BooleanArray(2)
     private var touchMode = true                                   // true = toque com o dedo; false = laser + pinca
     private val palmBase = FloatArray(2); private val palmNow = FloatArray(2); private val pushOn = BooleanArray(2)
@@ -475,16 +481,59 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             if (!sOn[k]) { sx[k] = tx0; sy[k] = ty0 } else { sx[k] += (tx0 - sx[k]) * sm; sy[k] += (ty0 - sy[k]) * sm }
             sOn[k] = true; seen[k] = true
             val press = hd.pinch || (touchMode && pushOn[k])
-            ptrs.add(Ptr(hd, if (touchMode) tipX else ox, if (touchMode) tipY else oy, sx[k], sy[k], press))
+            ptrs.add(Ptr(hd, if (touchMode) tipX else ox, if (touchMode) tipY else oy, sx[k], sy[k], press, k))
         }
         for (k in 0..1) if (!seen[k]) sOn[k] = false
-        val act = ptrs.firstOrNull { it.pinch } ?: ptrs.firstOrNull()
+        // a mao mais a esquerda na imagem abre o menu nas pontas dos dedos; a outra aponta e clica
+        var host: Ptr? = null; var pointer: Ptr? = null
+        if (ptrs.size >= 2) { val sorted = ptrs.sortedBy { it.hand.pts[0] }; host = sorted[0]; pointer = sorted[1] }
+        else if (ptrs.size == 1) { host = ptrs[0]; pointer = ptrs[0] }
+        hostP = host; pointerP = pointer
+        val act = pointer
+
+        menuBtns.clear()
+        if (host != null && cb != null) {
+            val hh = host.hand
+            fun HX(i: Int) = (hh.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
+            fun HY(i: Int) = (hh.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
+            var ext = 0                                              // dedos estendidos (mao aberta)
+            for (j in 0..3) {
+                val mcp = 5 + 4 * j; val tip = 8 + 4 * j
+                if (hypot(HX(tip) - HX(0), HY(tip) - HY(0)) > hypot(HX(mcp) - HX(0), HY(mcp) - HY(0)) * 1.6f) ext++
+            }
+            if (ext >= 3 && !hh.pinch) {
+                val pl = hypot(HX(5) - HX(17), HY(5) - HY(17)).coerceAtLeast(20f)
+                val r = (pl * .2f).coerceIn(20f, 44f)
+                for (j in 0..3) {
+                    val tip = 8 + 4 * j; val dip = 7 + 4 * j
+                    var ux = HX(tip) - HX(dip); var uy = HY(tip) - HY(dip)
+                    val nn = hypot(ux, uy).coerceAtLeast(1f); ux /= nn; uy /= nn
+                    menuBtns.add(MBtn(menuIds[j], HX(tip) + ux * r * 1.7f, HY(tip) + uy * r * 1.7f, r))
+                }
+            }
+        }
+        val pressAllowed = !(menuBtns.isNotEmpty() && pointer === host)
+        var mId: String? = null; var mHand: Ptr? = null
+        if (mode == 0 && !pinching && menuBtns.isNotEmpty()) {
+            if (pointer != null && pointer !== host) {
+                for (mb in menuBtns) if (hypot(pointer.tx - mb.cx, pointer.ty - mb.cy) < mb.r * 1.25f) { mId = mb.id; mHand = pointer }
+            }
+            if (mId == null) for (mb in menuBtns) if (hypot(mb.cx, mb.cy) < mb.r * 1.25f) mId = mb.id    // olhar
+        }
+        menuHover = mId ?: ""
+        val menuPress = mHand?.pinch == true
+        menuPressing = menuPress
+        if (mId != null) {
+            if (mHand != null) { if (menuPress && !prevMenuPress) onButton(mId); mDwell = 0f }
+            else { if (mId == mDwellId) mDwell += dt else mDwell = 0f; mDwellId = mId; if (mDwell >= 1.2f) { onButton(mId); mDwell = -.8f } }
+        } else { mDwell = 0f; mDwellId = "" }
+        prevMenuPress = menuPress
 
         val o = floatArrayOf(head[0], head[1], head[2])
         val d = if (act != null) rayFromEye(act.tx, act.ty) else F
         rayO = o; rayD = d
 
-        val h = if (mode == 0) pick(o, d) else gw?.let { planeHit(it, o, d) }
+        val h = if (mId != null) null else if (mode == 0) pick(o, d) else gw?.let { planeHit(it, o, d) }
         curHit = h
         val id = if (mode == 0 && h != null) btnAt(h) else null
         val key = if (mode == 0 && h != null) h.win.id + ":" + (id ?: "") else ""
@@ -492,7 +541,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
         if (tap) { tap = false; if (h != null && mode == 0) activate(h, true) }
 
-        val pinch = act?.pinch == true
+        val pinch = act?.pinch == true && pressAllowed && mId == null
         if (pinch && !pinching) {
             pinching = true; dwell = -.8f
             if (h != null) {
@@ -555,7 +604,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             fun X(i: Int) = (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
             fun Y(i: Int) = (q.hand.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
             val palm = hypot(X(0) - X(9), Y(0) - Y(9)).coerceAtLeast(20f)
-            // mao: contorno preto nas bordas + interior em degrade (preto no punho -> cinza nas pontas)
+            // mao: interior escuro em degrade (preto no punho -> cinza nas pontas) + linha fina clara nas bordas
             val paths = ArrayList<Path>()
             for (ch in chains) {
                 val pth = Path(); pth.moveTo(X(ch[0]), Y(ch[0]))
@@ -566,20 +615,21 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             for (i in intArrayOf(1, 5, 9, 13, 17)) pm.lineTo(X(i), Y(i))
             pm.close()
             val w0 = palm * .26f
-            val ow = (palm * .06f).coerceAtLeast(3f)
+            val ow = (palm * .025f).coerceIn(2f, 4f)
             hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
             hp.shader = null
-            hp.color = 0xFF000000.toInt()                                   // 1) contorno preto
+            hp.color = 0xCCE6E6E6.toInt()                                   // 1) linha fina clara nas bordas (estilo Quest)
             hp.style = Paint.Style.STROKE; hp.strokeWidth = w0 + 2f * ow
             for (pth in paths) c.drawPath(pth, hp)
             hp.style = Paint.Style.FILL_AND_STROKE; hp.strokeWidth = 2f * ow
             c.drawPath(pm, hp)
             hp.shader = LinearGradient(X(0), Y(0), X(12) + .5f, Y(12) + .5f,  // 2) interior em degrade
-                0xFF000000.toInt(), 0xFFB4B4B4.toInt(), Shader.TileMode.CLAMP)
+                0xFF000000.toInt(), 0xFF7A7A7A.toInt(), Shader.TileMode.CLAMP)
             hp.style = Paint.Style.STROKE; hp.strokeWidth = w0
             for (pth in paths) c.drawPath(pth, hp)
             hp.style = Paint.Style.FILL; c.drawPath(pm, hp)
             hp.shader = null
+            if (q === pointerP && !(menuBtns.isNotEmpty() && pointerP === hostP)) {
             val col = if (q.pinch) 0xFF22C55E.toInt() else 0xFFFFFFFF.toInt()
             hp.style = Paint.Style.STROKE
             hp.shader = LinearGradient(q.ox, q.oy, q.tx + .5f, q.ty + .5f, col, col and 0x00FFFFFF, Shader.TileMode.CLAMP)
@@ -588,6 +638,52 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             hp.shader = null
             hp.style = Paint.Style.FILL; hp.color = if (q.pinch) 0xFF22C55E.toInt() else 0xDDFFFFFF.toInt()
             c.drawCircle(q.ox, q.oy, if (q.pinch) 9f else 12f, hp)
+            }
+        }
+        for (mb in menuBtns) drawMenuBtn(c, mb)
+        hp.style = Paint.Style.FILL
+    }
+
+    /** Botao redondo na ponta do dedo, com icone desenhado (casa, teclado, centrar, engrenagem). */
+    private fun drawMenuBtn(c: Canvas, mb: MBtn) {
+        val hot = menuHover == mb.id
+        val x = mb.cx; val y = mb.cy; val r = mb.r
+        hp.shader = null
+        hp.style = Paint.Style.FILL
+        hp.color = if (hot) (if (menuPressing) 0xFF22C55E.toInt() else 0xFF6A6A6A.toInt()) else 0xE62A2A2A.toInt()
+        c.drawCircle(x, y, r, hp)
+        hp.style = Paint.Style.STROKE; hp.strokeWidth = 3f; hp.color = 0xFFE6E6E6.toInt()
+        c.drawCircle(x, y, r, hp)
+        hp.color = Color.WHITE; hp.strokeWidth = max(2f, r * .09f)
+        hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
+        when (mb.id) {
+            "lib" -> {
+                val roof = Path()
+                roof.moveTo(x - r * .55f, y - r * .02f); roof.lineTo(x, y - r * .55f); roof.lineTo(x + r * .55f, y - r * .02f)
+                c.drawPath(roof, hp)
+                c.drawRect(x - r * .38f, y - r * .02f, x + r * .38f, y + r * .48f, hp)
+            }
+            "kb" -> {
+                c.drawRoundRect(RectF(x - r * .6f, y - r * .32f, x + r * .6f, y + r * .32f), r * .1f, r * .1f, hp)
+                hp.style = Paint.Style.FILL
+                for (i in 0..2) for (j in 0..1) {
+                    val kx = x - r * .42f + i * r * .34f; val ky = y - r * .18f + j * r * .22f
+                    c.drawRect(kx, ky, kx + r * .16f, ky + r * .12f, hp)
+                }
+            }
+            "rc" -> {
+                c.drawCircle(x, y, r * .36f, hp)
+                hp.style = Paint.Style.FILL; c.drawCircle(x, y, r * .1f, hp); hp.style = Paint.Style.STROKE
+                c.drawLine(x, y - r * .46f, x, y - r * .66f, hp); c.drawLine(x, y + r * .46f, x, y + r * .66f, hp)
+                c.drawLine(x - r * .46f, y, x - r * .66f, y, hp); c.drawLine(x + r * .46f, y, x + r * .66f, y, hp)
+            }
+            else -> {
+                c.drawCircle(x, y, r * .3f, hp)
+                for (i in 0..7) {
+                    val a = i * (PI.toFloat() / 4f)
+                    c.drawLine(x + cos(a) * r * .42f, y + sin(a) * r * .42f, x + cos(a) * r * .62f, y + sin(a) * r * .62f, hp)
+                }
+            }
         }
         hp.style = Paint.Style.FILL
     }
