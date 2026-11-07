@@ -555,17 +555,31 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             fun X(i: Int) = (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
             fun Y(i: Int) = (q.hand.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
             val palm = hypot(X(0) - X(9), Y(0) - Y(9)).coerceAtLeast(20f)
-            hp.shader = null
-            hp.style = Paint.Style.STROKE; hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
-            hp.color = 0xCC3F5F7F.toInt(); hp.strokeWidth = palm * .26f
+            // mao: contorno preto nas bordas + interior em degrade (preto no punho -> cinza nas pontas)
+            val paths = ArrayList<Path>()
             for (ch in chains) {
-                val path = Path(); path.moveTo(X(ch[0]), Y(ch[0]))
-                for (k in 1 until ch.size) path.lineTo(X(ch[k]), Y(ch[k]))
-                c.drawPath(path, hp)
+                val pth = Path(); pth.moveTo(X(ch[0]), Y(ch[0]))
+                for (k in 1 until ch.size) pth.lineTo(X(ch[k]), Y(ch[k]))
+                paths.add(pth)
             }
             val pm = Path(); pm.moveTo(X(0), Y(0))
             for (i in intArrayOf(1, 5, 9, 13, 17)) pm.lineTo(X(i), Y(i))
-            pm.close(); hp.style = Paint.Style.FILL; c.drawPath(pm, hp)
+            pm.close()
+            val w0 = palm * .26f
+            val ow = (palm * .06f).coerceAtLeast(3f)
+            hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
+            hp.shader = null
+            hp.color = 0xFF000000.toInt()                                   // 1) contorno preto
+            hp.style = Paint.Style.STROKE; hp.strokeWidth = w0 + 2f * ow
+            for (pth in paths) c.drawPath(pth, hp)
+            hp.style = Paint.Style.FILL_AND_STROKE; hp.strokeWidth = 2f * ow
+            c.drawPath(pm, hp)
+            hp.shader = LinearGradient(X(0), Y(0), X(12) + .5f, Y(12) + .5f,  // 2) interior em degrade
+                0xFF000000.toInt(), 0xFFB4B4B4.toInt(), Shader.TileMode.CLAMP)
+            hp.style = Paint.Style.STROKE; hp.strokeWidth = w0
+            for (pth in paths) c.drawPath(pth, hp)
+            hp.style = Paint.Style.FILL; c.drawPath(pm, hp)
+            hp.shader = null
             val col = if (q.pinch) 0xFF22C55E.toInt() else 0xFFFFFFFF.toInt()
             hp.style = Paint.Style.STROKE
             hp.shader = LinearGradient(q.ox, q.oy, q.tx + .5f, q.ty + .5f, col, col and 0x00FFFFFF, Shader.TileMode.CLAMP)
