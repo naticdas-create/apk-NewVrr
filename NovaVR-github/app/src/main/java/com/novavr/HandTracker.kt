@@ -38,6 +38,8 @@ class HandTracker(ctx: Context) {
     private val pinM = BooleanArray(2)
     private val pinR = BooleanArray(2)
     private val pinP = BooleanArray(2)
+    private val sm = Array(2) { FloatArray(42) }              // pontos suavizados (menos tremor)
+    private val smOn = BooleanArray(2)
     private var last: List<Hand> = emptyList()
     private var lastSeen = 0L
 
@@ -66,9 +68,13 @@ class HandTracker(ctx: Context) {
             val strength = ((0.7f - rI) / 0.5f).coerceIn(0f, 1f)
             val pts = FloatArray(42)
             for (j in 0 until 21) { pts[2 * j] = h[j].x(); pts[2 * j + 1] = h[j].y() }
-            out.add(Hand(left, pts, pin[k], strength, pinM[k] && !pin[k], pinR[k] && !pin[k], pinP[k] && !pin[k], conf))
+            val sp = sm[k]
+            if (!smOn[k]) { for (j in 0 until 42) sp[j] = pts[j]; smOn[k] = true }
+            else { for (j in 0 until 42) sp[j] += (pts[j] - sp[j]) * 0.6f }
+            out.add(Hand(left, sp.copyOf(), pin[k], strength, pinM[k] && !pin[k], pinR[k] && !pin[k], pinP[k] && !pin[k], conf))
         }
         if (out.isEmpty()) {
+            smOn[0] = false; smOn[1] = false
             // perdeu o rastreio: a mao some aos poucos (como no Quest) em vez de piscar
             val age = now - lastSeen
             if (age >= 200 || last.isEmpty()) return out
