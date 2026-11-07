@@ -7,6 +7,8 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.hypot
 
 /**
@@ -25,6 +27,28 @@ class Hand(
     val conf: Float = 1f
 )
 
+/**
+ * Filtro One Euro: parado = bem firme (sem tremor), em movimento = acompanha rapido (sem atraso).
+ * minCut baixo = mais firme; beta alto = mais rapido ao mover.
+ */
+private class OneEuro(private val minCut: Float, private val beta: Float) {
+    private var xp = 0f
+    private var dxp = 0f
+    private var on = false
+    private fun alpha(cut: Float, dt: Float): Float {
+        val tau = 1f / (2f * PI.toFloat() * cut)
+        return 1f / (1f + tau / dt)
+    }
+    fun reset() { on = false }
+    fun filter(x: Float, dt: Float): Float {
+        if (!on) { on = true; xp = x; dxp = 0f; return x }
+        val dx = (x - xp) / dt
+        dxp += alpha(1f, dt) * (dx - dxp)
+        xp += alpha(minCut + beta * abs(dxp), dt) * (x - xp)
+        return xp
+    }
+}
+
 class HandTracker(ctx: Context) {
     private val lm: HandLandmarker = HandLandmarker.createFromOptions(
         ctx,
@@ -38,15 +62,19 @@ class HandTracker(ctx: Context) {
     private val pinM = BooleanArray(2)
     private val pinR = BooleanArray(2)
     private val pinP = BooleanArray(2)
-    private val sm = Array(2) { FloatArray(42) }              // pontos suavizados (menos tremor)
-    private val smOn = BooleanArray(2)
+    private val sm = Array(2) { FloatArray(42) }              // pontos filtrados (saida)
+    private val flt = Array(2) { Array(42) { OneEuro(1.4f, 30f) } }
     private var last: List<Hand> = emptyList()
     private var lastSeen = 0L
+    private var lastDet = 0L
 
     fun detect(b: Bitmap): List<Hand> {
         val now = SystemClock.uptimeMillis()
+        val dt = if (lastDet == 0L) .033f else ((now - lastDet) / 1000f).coerceIn(.008f, .1f)
+        lastDet = now
         val r = lm.detectForVideo(BitmapImageBuilder(b).build(), now)
         val out = ArrayList<Hand>()
+        val seen = BooleanArray(2)
         val lms = r.landmarks()
         val hds = r.handedness()
         lms.forEachIndexed { i, h ->
@@ -54,6 +82,7 @@ class HandTracker(ctx: Context) {
             val left = cat?.categoryName() == "Left"
             val conf = cat?.score() ?: 1f
             val k = if (left) 0 else 1
+            seen[k] = true
             fun d(a: Int, c: Int) = hypot(h[a].x() - h[c].x(), h[a].y() - h[c].y())
             val palm = d(0, 9).coerceAtLeast(1e-3f)
             val rI = d(4, 8) / palm
@@ -66,15 +95,15 @@ class HandTracker(ctx: Context) {
             pinR[k] = if (pinR[k]) rR < 0.65f else (rR < 0.4f && rR < rI - 0.05f && rR < rM - 0.05f)
             pinP[k] = if (pinP[k]) rP < 0.65f else (rP < 0.4f && rP < rI - 0.05f && rP < rM - 0.05f && rP < rR - 0.05f)
             val strength = ((0.7f - rI) / 0.5f).coerceIn(0f, 1f)
-            val pts = FloatArray(42)
-            for (j in 0 until 21) { pts[2 * j] = h[j].x(); pts[2 * j + 1] = h[j].y() }
             val sp = sm[k]
-            if (!smOn[k]) { for (j in 0 until 42) sp[j] = pts[j]; smOn[k] = true }
-            else { for (j in 0 until 42) sp[j] += (pts[j] - sp[j]) * 0.6f }
+            for (j in 0 until 21) {
+                sp[2 * j] = flt[k][2 * j].filter(h[j].x(), dt)
+                sp[2 * j + 1] = flt[k][2 * j + 1].filter(h[j].y(), dt)
+            }
             out.add(Hand(left, sp.copyOf(), pin[k], strength, pinM[k] && !pin[k], pinR[k] && !pin[k], pinP[k] && !pin[k], conf))
         }
+        for (k in 0..1) if (!seen[k]) for (f in flt[k]) f.reset()
         if (out.isEmpty()) {
-            smOn[0] = false; smOn[1] = false
             // perdeu o rastreio: a mao some aos poucos (como no Quest) em vez de piscar
             val age = now - lastSeen
             if (age >= 200 || last.isEmpty()) return out
