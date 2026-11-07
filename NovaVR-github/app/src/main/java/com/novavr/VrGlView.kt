@@ -340,9 +340,10 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         key(c, w, "rc", "Recentrar", RectF(40f, 540f, 340f, 624f), 30f)
         key(c, w, "mode", if (touchMode) "Modo: Toque" else "Modo: Laser", RectF(360f, 540f, 660f, 624f), 28f)
         key(c, w, "exit", "Sair", RectF(680f, 540f, 960f, 624f), 30f)
+        key(c, w, "hand", if (dominantRight) "Mao dominante: Direita" else "Mao dominante: Esquerda", RectF(40f, 640f, 660f, 705f), 28f)
         tp.textAlign = Paint.Align.LEFT; tp.textSize = 26f; tp.color = 0xFF9AA3BD.toInt()
-        c.drawText("As janelas ficam fixas no mundo virtual.", 40f, 700f, tp)
-        c.drawText("Posicao: " + (ar?.status ?: "sem ARCore (use Andar)"), 40f, 740f, tp)
+        c.drawText("As janelas ficam fixas no mundo virtual.", 40f, 735f, tp)
+        c.drawText("Posicao: " + (ar?.status ?: "sem ARCore (use Andar)"), 40f, 775f, tp)
         w.dirty = true
     }
 
@@ -367,6 +368,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             id == "cfg" -> toggle(cfg)
             id == "rc" -> { needCenter = true; havePos0 = false }
             id == "mode" -> touchMode = !touchMode
+            id == "hand" -> dominantRight = !dominantRight
             id == "exit" -> post { onExit() }
             id == "k1-" -> k1 = (k1 - .03f).coerceAtLeast(0f)
             id == "k1+" -> k1 = (k1 + .03f).coerceAtMost(.6f)
@@ -399,6 +401,10 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private var hostP: Ptr? = null; private var pointerP: Ptr? = null
     private var menuHover = ""; private var menuPressing = false; private var prevMenuPress = false
     private var mDwell = 0f; private var mDwellId = ""
+    private var dominantRight = true                                // mao dominante (a outra abre o menu)
+    private var gDist0 = 1f                                         // distancia inicial entre as maos (redimensionar)
+    private val prevMid = BooleanArray(2); private val prevRing = BooleanArray(2); private val prevPinky = BooleanArray(2)
+    private var prevHostPinch = false; private var menuShownPrev = false
     private val sx = FloatArray(2); private val sy = FloatArray(2); private val sOn = BooleanArray(2)
     private var touchMode = true                                   // true = toque com o dedo; false = laser + pinca
     private val palmBase = FloatArray(2); private val palmNow = FloatArray(2); private val pushOn = BooleanArray(2)
@@ -463,6 +469,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         val ew = fw / 2f; val eh = fh.toFloat()
         val seen = BooleanArray(2)
         if (cb != null) for (hd in hs) {
+            if (hd.conf < .5f) continue                              // ponteiro invalido com confianca baixa
             val k = if (hd.left) 0 else 1
             fun X(i: Int) = (hd.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
             fun Y(i: Int) = (hd.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
@@ -484,9 +491,12 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             ptrs.add(Ptr(hd, if (touchMode) tipX else ox, if (touchMode) tipY else oy, sx[k], sy[k], press, k))
         }
         for (k in 0..1) if (!seen[k]) sOn[k] = false
-        // a mao mais a esquerda na imagem abre o menu nas pontas dos dedos; a outra aponta e clica
+        // a mao nao dominante abre o menu nas pontas dos dedos; a dominante aponta e clica
         var host: Ptr? = null; var pointer: Ptr? = null
-        if (ptrs.size >= 2) { val sorted = ptrs.sortedBy { it.hand.pts[0] }; host = sorted[0]; pointer = sorted[1] }
+        if (ptrs.size >= 2) {
+            val sorted = ptrs.sortedBy { it.hand.pts[0] }
+            if (dominantRight) { host = sorted[0]; pointer = sorted[1] } else { host = sorted[1]; pointer = sorted[0] }
+        }
         else if (ptrs.size == 1) { host = ptrs[0]; pointer = ptrs[0] }
         hostP = host; pointerP = pointer
         val act = pointer
@@ -529,9 +539,47 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         } else { mDwell = 0f; mDwellId = "" }
         prevMenuPress = menuPress
 
+        // gestos extras (mapeados por mim): pinca do dedo medio = voltar, anelar = recentrar, minimo = teclado
+        for (q in ptrs) {
+            val kk = q.k
+            if (q.hand.mid && !prevMid[kk]) onButton("back")
+            if (q.hand.ring && !prevRing[kk]) onButton("rc")
+            if (q.hand.pinky && !prevPinky[kk]) onButton("kb")
+            prevMid[kk] = q.hand.mid; prevRing[kk] = q.hand.ring; prevPinky[kk] = q.hand.pinky
+        }
+        for (kk in 0..1) if (!seen[kk]) { prevMid[kk] = false; prevRing[kk] = false; prevPinky[kk] = false }
+        // gesto de sistema: pinca da mao do menu (com a outra mao livre) abre/fecha a biblioteca, como o botao Meta
+        val hostPinch = host?.hand?.pinch == true
+        if (ptrs.size >= 2 && hostPinch && !prevHostPinch && menuShownPrev && pointer?.hand?.pinch != true) { toggle(apps); ui("dock") }
+        prevHostPinch = hostPinch
+        menuShownPrev = menuBtns.isNotEmpty()
+
         val o = floatArrayOf(head[0], head[1], head[2])
         val d = if (act != null) rayFromEye(act.tx, act.ty) else F
         rayO = o; rayD = d
+
+        // duas maos: pinca nas duas sobre a mesma janela = redimensionar (afastar = aumentar)
+        val bothPinch = ptrs.size >= 2 && ptrs[0].hand.pinch && ptrs[1].hand.pinch
+        if (bothPinch) {
+            val pa = ptrs[0]; val pb = ptrs[1]
+            val dist2 = hypot(pa.tx - pb.tx, pa.ty - pb.ty).coerceAtLeast(10f)
+            if (mode == 5) {
+                val w5 = gw
+                if (w5 != null) w5.scale = (gScale * dist2 / gDist0).coerceIn(.4f, 3f)
+                curHit = null
+                return
+            } else if (mode == 0 && !pinching) {
+                val ha = pick(o, rayFromEye(pa.tx, pa.ty)); val hb = pick(o, rayFromEye(pb.tx, pb.ty))
+                if (ha != null && hb != null && ha.win === hb.win && !ha.title && !hb.title) {
+                    mode = 5; gw = ha.win; gScale = ha.win.scale; gDist0 = dist2
+                    curHit = null
+                    return
+                }
+            }
+        } else if (mode == 5) {
+            mode = 0; gw = null
+            pinching = ptrs.any { it.hand.pinch }
+        }
 
         val h = if (mId != null) null else if (mode == 0) pick(o, d) else gw?.let { planeHit(it, o, d) }
         curHit = h
@@ -601,6 +649,9 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         c.drawText("camera: " + (if (cam != null) "ok" else "nao") + "   maos: " + hands.size + (if (touchMode) "   toque" else "   laser") + (if (pinching) "   CLIQUE" else "") + "   Q" + (level + 1), 0f, -eh / 2f + 60f, tp)
         val cb = cam ?: return
         for (q in ptrs) {
+            val fade = ((q.hand.conf - .45f) / .35f).coerceIn(0f, 1f)
+            @Suppress("DEPRECATION")
+            c.saveLayerAlpha(-ew, -eh, ew, eh, (255f * fade).toInt())
             fun X(i: Int) = (q.hand.pts[2 * i] * cb.width - cropL) * cropS - ew / 2f
             fun Y(i: Int) = (q.hand.pts[2 * i + 1] * cb.height - cropT) * cropS - eh / 2f
             val palm = hypot(X(0) - X(9), Y(0) - Y(9)).coerceAtLeast(20f)
@@ -618,7 +669,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             val ow = (palm * .025f).coerceIn(2f, 4f)
             hp.strokeCap = Paint.Cap.ROUND; hp.strokeJoin = Paint.Join.ROUND
             hp.shader = null
-            hp.color = 0xCCE6E6E6.toInt()                                   // 1) linha fina clara nas bordas (estilo Quest)
+            hp.color = if (q === hostP && menuBtns.isNotEmpty()) 0xFFFFFFFF.toInt() else 0xCCE6E6E6.toInt()                                   // 1) linha fina clara nas bordas (estilo Quest)
             hp.style = Paint.Style.STROKE; hp.strokeWidth = w0 + 2f * ow
             for (pth in paths) c.drawPath(pth, hp)
             hp.style = Paint.Style.FILL_AND_STROKE; hp.strokeWidth = 2f * ow
@@ -637,8 +688,9 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             hp.strokeWidth = 6f; hp.alpha = 255; c.drawLine(q.ox, q.oy, q.tx, q.ty, hp)
             hp.shader = null
             hp.style = Paint.Style.FILL; hp.color = if (q.pinch) 0xFF22C55E.toInt() else 0xDDFFFFFF.toInt()
-            c.drawCircle(q.ox, q.oy, if (q.pinch) 9f else 12f, hp)
+            c.drawCircle(q.ox, q.oy, if (q.pinch) 8f else 14f - 6f * q.hand.strength, hp)
             }
+            c.restore()
         }
         for (mb in menuBtns) drawMenuBtn(c, mb)
         hp.style = Paint.Style.FILL
