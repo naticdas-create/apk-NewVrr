@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
+import kotlin.math.ln
 
 /**
  * Andar para frente e para tras usando so a camera (sem ARCore). EXPERIMENTAL.
@@ -22,7 +23,10 @@ class VoLite {
         private val SCALES = floatArrayOf(.86f, .89f, .92f, .95f, .97f, 1.0f, 1.03f, 1.05f, 1.08f, 1.11f, 1.15f)
     }
 
-    @Volatile var enabled = true
+    @Volatile var enabled = true               // mede o sentido (frente/tras) para o andar por passos
+    @Volatile var integrate = false            // somar distancia pela camera (impreciso): desligado
+    @Volatile var trend = 0f                   // < 0 = imagem encolhendo (andando para tras)
+    fun dir(): Int = if (trend < -0.03f) -1 else 1
     @Volatile var depth = 2.5f                 // profundidade tipica da cena, em metros (ajustavel)
 
     private val ex = Executors.newSingleThreadExecutor()
@@ -75,12 +79,13 @@ class VoLite {
         if (p == null) return
         if (rot > 0.5f) { prevD = 0f; prevApplied = false; return }        // girando a cabeca: ignora
         val s = estimateScale(p, c)
+        trend = trend * 0.8f + ln(s)
         if (s == 1f) { prevD = 0f; prevApplied = false; return }
         var d = depth * (1f - 1f / s)
         if (d > 0.5f) d = 0.5f
         if (d < -0.5f) d = -0.5f
         if (prevD != 0f && (prevD > 0f) == (d > 0f)) {                     // duas medidas seguidas no mesmo sentido
-            addDist(if (prevApplied) d else d + prevD)
+            if (integrate) addDist(if (prevApplied) d else d + prevD)
             prevApplied = true
         } else {
             prevApplied = false
