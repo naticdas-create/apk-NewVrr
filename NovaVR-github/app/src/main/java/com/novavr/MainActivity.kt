@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.content.Context
+import android.hardware.SensorManager
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Size
@@ -26,6 +28,7 @@ class MainActivity : AppCompatActivity() {
     private var ar: ArTracker? = null
     private var fcount = 0
     private val vo = VoLite()
+    private lateinit var walker: StepWalker
     private val exec = Executors.newSingleThreadExecutor()
     private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) startCamera() }
 
@@ -41,6 +44,8 @@ class MainActivity : AppCompatActivity() {
         browser = BrowserSurface(this, 1024, 576)
         vr = VrGlView(this, browser) { finish() }
         vr.vo = vo
+        walker = StepWalker(getSystemService(Context.SENSOR_SERVICE) as SensorManager)
+        vr.walker = walker
         setContentView(vr)
         browser.start("https://www.youtube.com/")
         perm.launch(Manifest.permission.CAMERA)
@@ -55,7 +60,7 @@ class MainActivity : AppCompatActivity() {
             if (a.create()) { ar = a; vr.ar = a; a.resume(); return }
             Toast.makeText(this, "ARCore falhou: sem tracking de posicao", Toast.LENGTH_LONG).show()
         } else {
-            Toast.makeText(this, "ARCore indisponivel: instale Servicos do Google Play para RA", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Este celular nao tem ARCore: so a rotacao da cabeca funciona", Toast.LENGTH_LONG).show()
         }
         val f = ProcessCameraProvider.getInstance(this)
         f.addListener({
@@ -83,8 +88,8 @@ class MainActivity : AppCompatActivity() {
         }, androidx.core.content.ContextCompat.getMainExecutor(this))
     }
 
-    override fun onResume() { super.onResume(); vr.onResume(); ar?.resume() }
-    override fun onPause() { ar?.pause(); vr.onPause(); super.onPause() }
+    override fun onResume() { super.onResume(); vr.onResume(); ar?.resume(); walker.start() }
+    override fun onPause() { walker.stop(); ar?.pause(); vr.onPause(); super.onPause() }
 
     override fun onDestroy() {
         super.onDestroy()
