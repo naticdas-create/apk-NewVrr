@@ -5,6 +5,8 @@ import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.content.Context
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.hardware.SensorManager
 import android.os.Bundle
 import android.os.SystemClock
@@ -29,6 +31,7 @@ class MainActivity : AppCompatActivity() {
     private var fcount = 0
     private val vo = VoLite()
     private lateinit var walker: StepWalker
+    private lateinit var depth: DepthNet
     private val exec = Executors.newSingleThreadExecutor()
     private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) startCamera() }
 
@@ -46,9 +49,29 @@ class MainActivity : AppCompatActivity() {
         vr.vo = vo
         walker = StepWalker(getSystemService(Context.SENSOR_SERVICE) as SensorManager)
         vr.walker = walker
+        vr.vio = Vio(cameraFovX())
+        depth = DepthNet(this)
+        vr.depth = depth
+        Thread { depth.init() }.start()                          // carrega o modelo de profundidade em segundo plano
         setContentView(vr)
         browser.start("https://www.youtube.com/")
         perm.launch(Manifest.permission.CAMERA)
+    }
+
+    /** Campo de visao horizontal da camera traseira (graus), pelo tamanho do sensor e a distancia focal. */
+    private fun cameraFovX(): Float {
+        try {
+            val mgr = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            for (id in mgr.cameraIdList) {
+                val ch = mgr.getCameraCharacteristics(id)
+                if (ch.get(CameraCharacteristics.LENS_FACING) != CameraCharacteristics.LENS_FACING_BACK) continue
+                val fl = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: continue
+                val sz = ch.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: continue
+                val fov = Math.toDegrees(2.0 * Math.atan(sz.width / (2.0 * fl))).toFloat()
+                if (fov in 40f..110f) return fov
+            }
+        } catch (e: Exception) { }
+        return 65f
     }
 
     private fun startCamera() {
