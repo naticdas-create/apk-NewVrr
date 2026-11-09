@@ -72,9 +72,10 @@ class Win(val id: String, val w: Float, val h: Float, val bw: Int, val bh: Int, 
 private const val CURVE_R = 3.5f   // raio da curvatura das janelas (metros), como no Quest
 
 private const val VS_W = """
-attribute vec2 aPos; uniform mat4 uMVP; uniform vec4 uUV; uniform float uBend; varying vec2 vUV; varying vec2 vLocal;
+attribute vec2 aPos; uniform mat4 uMVP; uniform vec4 uUV; uniform float uBend; varying vec2 vUV; varying vec2 vLocal; varying float vDepth;
 void main(){ vLocal = aPos;
-  gl_Position = uMVP * vec4(aPos.x, aPos.y, aPos.x * aPos.x * uBend, 1.0);
+  vec4 pos = uMVP * vec4(aPos.x, aPos.y, aPos.x * aPos.x * uBend, 1.0);
+  gl_Position = pos; vDepth = pos.w;
   vUV = uUV.xy + vec2(aPos.x + 0.5, 0.5 - aPos.y) * uUV.zw; }"""
 private const val FS_W = """
 #ifdef GL_FRAGMENT_PRECISION_HIGH
@@ -83,13 +84,21 @@ precision highp float;
 precision mediump float;
 #endif
 uniform sampler2D uTex; uniform float uA; uniform vec2 uQuad; uniform vec2 uBox; uniform float uRad; uniform float uGlow; uniform float uShadow;
-varying vec2 vUV; varying vec2 vLocal;
+uniform sampler2D uDepth; uniform vec4 uVp; uniform vec4 uCrop; uniform float uOcc;
+varying vec2 vUV; varying vec2 vLocal; varying float vDepth;
 float sdBox(vec2 p, vec2 b, float r){ vec2 q = abs(p) - b + vec2(r); return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }
 void main(){
   vec2 p = vLocal * uQuad;
   float d = sdBox(p, uBox * 0.5, uRad);
+  float occ = 0.0;
+  if (uOcc > 0.5) {
+    vec2 sp = (gl_FragCoord.xy - uVp.xy) / uVp.zw;
+    vec2 cuv = vec2(uCrop.x + sp.x * uCrop.z, uCrop.y + (1.0 - sp.y) * uCrop.w);
+    float od = texture2D(uDepth, cuv).r * 8.0;
+    occ = smoothstep(0.25, 0.65, vDepth - od);
+  }
   if (uShadow > 0.5) {
-    float a = (1.0 - smoothstep(-0.01, 0.075, d)) * 0.5 * uA;
+    float a = (1.0 - smoothstep(-0.01, 0.075, d)) * 0.5 * uA * (1.0 - occ);
     gl_FragColor = vec4(0.0, 0.0, 0.0, a);
     return;
   }
@@ -100,7 +109,7 @@ void main(){
   vec3 rc = vec3(0.90, 0.92, 1.0);
   c.rgb = c.rgb * (1.0 - k) + rc * k * max(c.a, 0.5);
   c.a = max(c.a, k * 0.5);
-  gl_FragColor = c * aa * uA;
+  gl_FragColor = c * aa * uA * (1.0 - occ);
 }"""
 private const val VS_Q = """
 attribute vec2 aPos; uniform mat4 uMVP; uniform vec4 uUV; varying vec2 vUV;
@@ -141,7 +150,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private val addr = Win("addr", 2.2f, .14f, 1760, 112, false).also { it.sd = 2.2f; it.sy = .93f; it.rad = .07f }
     private val apps = Win("apps", 1.3f, .9f, 1040, 720).also { it.title = "Biblioteca"; it.sd = 2.0f; it.sy = .1f; it.sa = -38f; it.rad = .07f }
     private val kb = Win("kb", 1.6f, .65f, 1280, 520).also { it.title = "Teclado"; it.sd = 1.6f; it.sy = -1.1f; it.rad = .06f }
-    private val cfg = Win("cfg", 1f, 1f, 1000, 1000).also { it.title = "Configuracoes"; it.sd = 2.0f; it.sy = .1f; it.sa = 38f; it.rad = .06f }
+    private val cfg = Win("cfg", 1f, 1.1f, 1000, 1100).also { it.title = "Configuracoes"; it.sd = 2.0f; it.sy = .1f; it.sa = 38f; it.rad = .06f }
     private val wins = listOf(browserWin, addr, dock, apps, kb, cfg)
 
     private class App(val id: String, val name: String, val url: String, val color: Int, val glyph: String)
@@ -158,8 +167,14 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     private val iconBmps = HashMap<String, Bitmap>()
     private val ip = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private fun loadIcons() {
-        for (id in listOf("yt", "nf", "sp", "dp", "g", "tw")) {
-            try { act.assets.open("icon_$id.png").use { iconBmps[id] = BitmapFactory.decodeStream(it) } } catch (e: Exception) { }
+        for ((id, b64) in IconData.DATA) {                       // icones embutidos no codigo
+            try {
+                val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { iconBmps[id] = it }
+            } catch (e: Exception) { }
+        }
+        for (a in appList) {                                     // icones oficiais em assets/icon_<id>.png substituem os embutidos
+            try { act.assets.open("icon_" + a.id + ".png").use { st -> BitmapFactory.decodeStream(st)?.let { iconBmps[a.id] = it } } } catch (e: Exception) { }
         }
     }
 
@@ -186,6 +201,15 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
     @Volatile var ar: ArTracker? = null
     @Volatile var vo: VoLite? = null                           // sentido do passo (frente/tras) pela camera
     @Volatile var walker: StepWalker? = null                   // andar por passos
+    @Volatile var vio: Vio? = null                             // direcao do movimento pela camera (sem ARCore)
+    @Volatile var depth: DepthNet? = null                      // profundidade por IA (oclusao)
+    private var lastAiCam: Bitmap? = null
+    private var depthTex = 0; private var lastDepthVer = -1; private var lastDepthStatus = ""
+    private var curEye = 0
+    private var wDepth = 0; private var wVp = 0; private var wCrop = 0; private var wOcc = 0
+    private class KeyFrame(val t: FloatArray, val x: Float, val z: Float, val yaw: Float)
+    private val kfs = ArrayList<KeyFrame>()                    // referencias visuais para recuperar a posicao
+    private var lastKfTick = 0L; private var relocs = 0
     private var dirMode = 0                                    // 0 = automatico (camera), 1 = sempre frente, 2 = sempre tras
     private val voRel = FloatArray(3); private val voPend = FloatArray(3)
     private var prevF = floatArrayOf(0f, 0f, -1f)
@@ -415,7 +439,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
 
     private fun drawCfg() {
         val w = cfg; val b = ensure(w); b.eraseColor(0); val c = Canvas(b); w.btns.clear()
-        panelBg(c, 1000, 1000, 44f)
+        panelBg(c, 1000, 1100, 44f)
         val rows = listOf(
             Triple("Lente k1", String.format(Locale.US, "%.2f", k1), "k1"),
             Triple("Lente k2", String.format(Locale.US, "%.2f", k2), "k2"),
@@ -444,9 +468,14 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         key(c, w, "z+", "+", RectF(890f, 720f, 970f, 790f), 32f)
         key(c, w, "dir", "Sentido: " + (when (dirMode) { 1 -> "sempre para frente"; 2 -> "sempre para tras"; else -> "automatico (camera)" }),
             RectF(40f, 810f, 960f, 880f), 26f)
+        val dnc = depth
+        key(c, w, "occ", if (dnc == null) "Oclusao (IA): indisponivel" else if (dnc.enabled) "Oclusao (IA): Ligada" else "Oclusao (IA): Desligada",
+            RectF(40f, 900f, 600f, 970f), 26f)
+        tp.textAlign = Paint.Align.LEFT; tp.textSize = 24f; tp.color = 0xFF9AA3BD.toInt()
+        c.drawText("IA: " + (dnc?.status ?: "-"), 630f, 945f, tp)
         tp.textAlign = Paint.Align.LEFT; tp.textSize = 26f; tp.color = 0xFF9AA3BD.toInt()
-        c.drawText("As janelas ficam fixas no mundo virtual.", 40f, 935f, tp)
-        c.drawText("Posicao: " + (ar?.status ?: "sem ARCore (andar por passos)"), 40f, 975f, tp)
+        c.drawText("As janelas ficam fixas no mundo virtual.", 40f, 1035f, tp)
+        c.drawText("Posicao: " + (ar?.status ?: "sem ARCore (andar por passos)"), 40f, 1075f, tp)
         w.dirty = true
     }
 
@@ -469,10 +498,11 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             id.startsWith("app:") -> appList.firstOrNull { it.id == id.substring(4) }?.let { load(it.url) }
             id == "kb" -> toggle(kb)
             id == "cfg" -> toggle(cfg)
-            id == "rc" -> { needCenter = true; havePos0 = false }
+            id == "rc" -> { needCenter = true; havePos0 = false; kfs.clear() }
             id == "mode" -> touchMode = !touchMode
             id == "hand" -> dominantRight = !dominantRight
             id == "diag" -> showDiag = !showDiag
+            id == "occ" -> depth?.let { it.enabled = !it.enabled }
             id == "vo" -> walker?.let { it.enabled = !it.enabled }
             id == "z-" -> walker?.let { it.stepLen = (it.stepLen - .05f).coerceAtLeast(.3f) }
             id == "z+" -> walker?.let { it.stepLen = (it.stepLen + .05f).coerceAtMost(1f) }
@@ -763,6 +793,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         } else if (pinching) {
             pinching = false
             if (mode == 1) sendTouch(MotionEvent.ACTION_UP, lastBx, lastBy)
+            if (mode == 2) anchorKeyframe()
             mode = 0; gw = null
         }
 
@@ -794,7 +825,9 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         if (showDiag) {
             tp.textAlign = Paint.Align.CENTER; tp.textSize = 22f; tp.color = 0xAAFFFFFF.toInt()
             c.drawText("camera: " + (if (cam != null) "ok" else "nao") + "   maos: " + hands.size + (if (touchMode) "   toque" else "   laser") +
-                (if (pinching) "   CLIQUE" else "") + "   Q" + (level + 1) + "   passos: " + (walker?.steps ?: 0), 0f, -eh / 2f + 50f, tp)
+                (if (pinching) "   CLIQUE" else "") + "   Q" + (level + 1) + "   passos: " + (walker?.steps ?: 0) +
+                "   vio: " + (vio?.inliers ?: 0) + "/" + String.format(Locale.US, "%.1f", vio?.parallax ?: 0f) + "px   ancoras: " + kfs.size + "/" + relocs +
+                "   ia: " + (depth?.status ?: "-"), 0f, -eh / 2f + 50f, tp)
         }
         val cb = cam ?: return
         for (q in ptrs) {
@@ -889,6 +922,69 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         hp.style = Paint.Style.FILL
     }
 
+    // ---------- ancoras: referencias visuais para recuperar a posicao ----------
+    private fun thumb(b: Bitmap): FloatArray {
+        val sm = Bitmap.createScaledBitmap(b, 48, 36, true)
+        val px = IntArray(48 * 36)
+        sm.getPixels(px, 0, 48, 0, 0, 48, 36)
+        val g = FloatArray(48 * 36)
+        var mean = 0f
+        for (i in g.indices) {
+            val c = px[i]
+            g[i] = ((c shr 16) and 255) * .299f + ((c shr 8) and 255) * .587f + (c and 255) * .114f
+            mean += g[i]
+        }
+        mean /= g.size
+        var vsum = 0f
+        for (i in g.indices) { g[i] -= mean; vsum += g[i] * g[i] }
+        val sd = sqrt(vsum / g.size).coerceAtLeast(1e-3f)
+        for (i in g.indices) g[i] /= sd
+        return g
+    }
+
+    private fun ncc(a: FloatArray, b: FloatArray): Float {
+        var s = 0f
+        for (i in a.indices) s += a[i] * b[i]
+        return s / a.size
+    }
+
+    /** Guarda uma referencia visual do lugar onde voce esta (quando posiciona uma janela). */
+    private fun anchorKeyframe() {
+        val cb = cam ?: return
+        for (k in kfs) if (hypot(k.x - head[0], k.z - head[2]) < .6f) return
+        kfs.add(KeyFrame(thumb(cb), head[0], head[2], atan2(F[0], -F[2])))
+        if (kfs.size > 10) kfs.removeAt(0)
+    }
+
+    /** A cada ~0,7 s: cria referencias ao se afastar e, se o ambiente "casa" com uma, corrige a deriva da posicao. */
+    private fun keyframeTick(b: Bitmap) {
+        val t = thumb(b)
+        val yaw = atan2(F[0], -F[2])
+        var nearest = Float.MAX_VALUE
+        for (k in kfs) nearest = minOf(nearest, hypot(k.x - head[0], k.z - head[2]))
+        if (kfs.isEmpty() || nearest > 1.2f) {
+            kfs.add(KeyFrame(t, head[0], head[2], yaw))
+            if (kfs.size > 10) kfs.removeAt(0)
+            return
+        }
+        for (k in kfs) {
+            if (abs(wrapA(yaw - k.yaw)) > .2f) continue            // so compara olhando para o mesmo lado
+            if (ncc(t, k.t) < .82f) continue                       // precisa ser muito parecido
+            val dx = k.x - head[0]; val dz = k.z - head[2]
+            val d = hypot(dx, dz)
+            if (d > .12f && d < 1f) { voPend[0] += dx * .5f; voPend[2] += dz * .5f; relocs++ }
+        }
+    }
+
+    private fun upDepth(d: ByteArray) {
+        if (depthTex == 0) depthTex = GlUtil.tex() else GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, depthTex)
+        val bb = ByteBuffer.allocateDirect(d.size)
+        bb.put(d)
+        bb.rewind()
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE, DepthNet.OW, DepthNet.OH, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, bb)
+    }
+
     // ---------- OpenGL ----------
     private var progQ = 0; private var progD = 0; private var progW = 0
     private var wPos = 0; private var wMvp = 0; private var wUv = 0; private var wBend = 0; private var wQuad = 0
@@ -925,6 +1021,8 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         wRad = GLES20.glGetUniformLocation(progW, "uRad"); wGlow = GLES20.glGetUniformLocation(progW, "uGlow")
         wAlpha = GLES20.glGetUniformLocation(progW, "uA"); wShadow = GLES20.glGetUniformLocation(progW, "uShadow")
         wTex = GLES20.glGetUniformLocation(progW, "uTex")
+        wDepth = GLES20.glGetUniformLocation(progW, "uDepth"); wVp = GLES20.glGetUniformLocation(progW, "uVp")
+        wCrop = GLES20.glGetUniformLocation(progW, "uCrop"); wOcc = GLES20.glGetUniformLocation(progW, "uOcc")
         qPos = GLES20.glGetAttribLocation(progQ, "aPos"); qMvp = GLES20.glGetUniformLocation(progQ, "uMVP")
         qUv = GLES20.glGetUniformLocation(progQ, "uUV"); qA = GLES20.glGetUniformLocation(progQ, "uA"); qTex = GLES20.glGetUniformLocation(progQ, "uTex")
         dPos = GLES20.glGetAttribLocation(progD, "aPos"); dK1 = GLES20.glGetUniformLocation(progD, "uK1")
@@ -936,7 +1034,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         strip = ByteBuffer.allocateDirect(sv.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
         strip.put(sv); strip.position(0)
         for (w in wins) { w.tex = 0; w.tTex = 0; w.dirty = true; w.tDirty = true }
-        camTex = 0; lastCam = null; ovTex = 0; curTex = 0; curKey = -1; lastVer = -1; fbo = 0
+        camTex = 0; lastCam = null; ovTex = 0; curTex = 0; curKey = -1; lastVer = -1; fbo = 0; depthTex = 0; lastDepthVer = -1
         texDims.clear(); arInit = false; lastOvKey = ""
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glEnable(GLES20.GL_BLEND)
@@ -1021,6 +1119,15 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
         GLES20.glUniform1i(wTex, 0)
+        val dn = depth
+        val occActive = dn != null && dn.enabled && depthTex != 0 && cam != null
+        GLES20.glUniform4f(wVp, curEye * (fw / 2f), 0f, fw / 2f, fh.toFloat())
+        GLES20.glUniform4f(wCrop, cu0, cv0, cus, cvs)
+        GLES20.glUniform1f(wOcc, if (occActive) 1f else 0f)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, if (depthTex != 0) depthTex else tex)
+        GLES20.glUniform1i(wDepth, 1)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, (STRIPN + 1) * 2)
     }
 
@@ -1113,8 +1220,14 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             if (dCam != 0f && v != null && v.integrate) { voPend[0] += fh[0] * dCam; voPend[2] += fh[2] * dCam }
             val n = wk?.takeSteps() ?: 0
             if (wk != null && n > 0) {                            // cada passo move voce; as janelas ficam paradas
-                val dsg = when (dirMode) { 1 -> 1f; 2 -> -1f; else -> (v?.dir() ?: 1).toFloat() }
-                voPend[0] += fh[0] * wk.stepLen * dsg * n; voPend[2] += fh[2] * wk.stepLen * dsg * n
+                val vi = vio
+                var mx = fh[0]; var mz = fh[2]
+                if (dirMode == 2) { mx = -fh[0]; mz = -fh[2] }
+                else if (dirMode == 0) {
+                    if (vi != null && vi.enabled && vi.conf > .35f) { mx = vi.dirX; mz = vi.dirZ }   // direcao medida pela camera
+                    else { val sg = (v?.dir() ?: 1).toFloat(); mx *= sg; mz *= sg }
+                }
+                voPend[0] += mx * wk.stepLen * n; voPend[2] += mz * wk.stepLen * n
             }
         }
         val kk = minOf(1f, dt * 6f)                               // suaviza o movimento para nao enjoar
@@ -1138,6 +1251,19 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
             cu0 = cropL / cb.width; cv0 = cropT / cb.height; cus = srcW / cb.width; cvs = srcH / cb.height
             if (cb !== lastCam) { camTex = up(camTex, cb); lastCam = cb }
         }
+        if (cb != null && cb !== lastAiCam) {                  // quadro novo: rastreio visual e profundidade
+            lastAiCam = cb
+            val tms = now / 1_000_000L
+            vio?.feed(cb, tms, R, U, F)
+            depth?.feed(cb, tms)
+        }
+        val dn2 = depth
+        if (dn2 != null) {
+            if (dn2.status != lastDepthStatus) { lastDepthStatus = dn2.status; ui("cfg") }
+            val dd = dn2.depth
+            if (dn2.enabled && dd != null && dn2.version != lastDepthVer) { lastDepthVer = dn2.version; upDepth(dd) }
+        }
+        if (cb != null && now - lastKfTick > 700_000_000L) { lastKfTick = now; keyframeTick(cb) }
 
         interact(dt)
         if (dirtyIds.isNotEmpty()) {                          // redesenha so as janelas que mudaram
@@ -1183,6 +1309,7 @@ class VrGlView(private val act: Activity, private val browser: BrowserSurface, p
         GLM.perspectiveM(proj, 0, 90f, ew.toFloat() / fh, .05f, 60f)
         for (eye in 0..1) {
             GLES20.glViewport(eye * ew, 0, ew, fh)
+            curEye = eye
             if (cam != null && camTex != 0) drawQuad(FULL, camTex, cu0, cv0, cus, cvs, 1f)
             val s = if (eye == 0) -ipd / 2f else ipd / 2f
             val ex = head[0] + R[0] * s; val ey = head[1] + R[1] * s; val ez = head[2] + R[2] * s
